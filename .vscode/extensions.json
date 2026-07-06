@@ -1,0 +1,9 @@
+{
+    "recommendations": [
+        "mshr-h.veriloghdl",
+        "eirikpre.systemverilog",
+        "ms-vscode.makefile-tools",
+        "eamodio.gitlens",
+        "usernamehw.errorlens"
+    ]
+}

@@ -1,0 +1,17 @@
+{
+  "flags": "-f files.f",
+  "index": [
+    {
+      "dirs": [
+        "rtl",
+        "tb"
+      ],
+      "excludeDirs": [
+        "build",
+        "sim",
+        "node_modules"
+      ]
+    }
+  ],
+  "build": "files.f"
+}
