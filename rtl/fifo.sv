@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-//Asynchronours FIFO
+//Synchronours FIFO
 
 module fifo #(
     parameter int WIDTH = 32,
@@ -16,7 +16,7 @@ module fifo #(
     output logic               full
 );
 
-  logic [WIDTH-1:0] fifo[DEPTH];
+  logic [WIDTH-1:0] mem[DEPTH];
   logic [$clog2(DEPTH):0] w_ptr;
   logic [$clog2(DEPTH):0] r_ptr;
 
@@ -27,12 +27,12 @@ module fifo #(
     end
 
     if (wr_enable && !full) begin
-      fifo[w_ptr] <= data_in;
+      mem[w_ptr] <= data_in;
       w_ptr <= w_ptr + 1;
     end
 
     if (rd_enable && !empty) begin
-      data_out <= fifo[r_ptr];
+      data_out <= mem[r_ptr];
       r_ptr    <= r_ptr + 1;
     end
 
