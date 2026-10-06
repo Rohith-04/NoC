@@ -35,7 +35,6 @@ Although this NoC is being developed as the communication backbone for the **Lin
 - [ ] Packet-based communication
 - [ ] AXI4-Stream interface
 - [ ] Multiple routing algorithms
-- [ ] Configurable topology
 - [ ] Extensive verification environment
 - [ ] FPGA implementation
 - [ ] Performance evaluation
