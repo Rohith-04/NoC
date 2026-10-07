@@ -3,96 +3,145 @@
 //------------------------------------------------------------------------------
 // NoC Input Port
 //
-// Terminates one incoming router link and manages the virtual channels
-// associated with that link.
+// Terminates one incoming router link and owns everything that belongs to the
+// receive side of that link:
 //
-// Each virtual channel contains:
+//   - one FIFO per virtual channel (flit buffering + flow control),
+//   - one route_compute instance per virtual channel (RC + lookahead),
+//   - the per-VC packet control state (route latch, output-VC assignment),
+//   - the request side of the VA and SA arbiters.
 //
-//   - A FIFO holding incoming flits.
-//   - Head-flit state indicating whether a flit is currently available to
-//     the arbitration stages.
-//   - The output port selected for the packet.
-//   - The output VC assigned during virtual-channel allocation.
+// It deliberately does NOT allocate, arbitrate or switch. Those live in
+// `arbiter` and `crossbar`. This module only asks for what it needs and obeys
+// the grants it is handed. Keeping the split here is what makes the arbiter
+// testable on its own with a mock input port, and the input port testable on
+// its own with a mock arbiter.
 //
-// Packet flow:
+// Packet flow (one VC shown; NUM_VC identical copies run in parallel):
 //
 //   incoming link
 //        |
 //        v
-//   VC demultiplex
+//   VC demultiplex (by sideband vc_id)
 //        |
 //        v
-//   per-VC FIFO
+//   per-VC FIFO -- fetch --> credit_return (registered, one cycle later)
 //        |
 //        v
-//   active head
+//   data_out = active flit                    <- the per-VC "head register"
 //        |
-//        +----> route computation
+//        +----> route_compute --> route_self  (this router's exit port)
+//        |                     \-> route_next (lookahead for next router)
 //        |
-//        +----> Virtual-channel allocation
-//                       |
-//                       v
-//                 Switch allocation
-//                       |
-//                       v
-//                 Switch traversal
+//        +----> VA request   (fresh packet still needs a downstream VC)
+//        |
+//        +----> SA request   (packet already owns a downstream VC)
+//                          |
+//                          v
+//                    sa_pick chooses this VC's flit for the crossbar
 //
-// Routing
+//
+// The timing rule everything else follows
+// ---------------------------------------
+// The FIFO's data_out is REGISTERED: a read issued in cycle t places the
+// fetched flit on data_out in t+1. Every signal in this module is defined
+// relative to that one fact:
+//
+//   cycle t       fetch[v] = 1  (fifo_rd_enable asserted; data_out stale)
+//   cycle t+1     data_out = fetched flit, head_valid = 1, arrive = 1
+//                   ^ ARRIVAL CYCLE. route_compute is live against this
+//                     flit's header, and the first VA request is issued now.
+//   end of t+1    out_port latched from rc_route_self
+//   cycle t+2     out_port stable; SA request can be issued (once VA granted)
+//
+// `arrive` is simply the registered form of `fetch`. It is the ONLY event
+// that marks "a freshly fetched flit is on data_out", so route capture keys
+// off `arrive && is_head` -- NOT off an edge of `head_valid`. Using a
+// head_valid edge mixes two different things (a flit becoming active and a
+// flit arriving) and, when head_valid is already high across a grant, misses
+// the event entirely.
+//
+//
+// The fetch rule (option ii)
+// --------------------------
+//     fetch = (!head_valid || sa_gnt) && (!fifo_empty || fifo_wr_enable)
+//
+// Read it as two independent clauses:
+//
+//   (!head_valid || sa_gnt)
+//       The head register must be free. It is free either because no flit is
+//       active, or because the active flit is leaving this cycle (sa_gnt) --
+//       in which case the departing flit frees the register at the same edge
+//       the new one arrives, so both may happen at once.
+//
+//   (!fifo_empty || fifo_wr_enable)
+//       There must be something to fetch: either a buffered flit, or a flit
+//       arriving on the link right now, which the FIFO's empty-bypass will
+//       forward straight to data_out without ever entering storage.
+//
+// When fetch and sa_gnt coincide, head_valid stays 1 (fetch wins the
+// assignment ordering in the sequential block below). This is what buys one
+// flit per cycle per VC. The alternative -- letting the grant clear
+// head_valid -- strands the flit that was just fetched.
+//
+//
+// Credits
 // -------
-// The routing information carried in a HEAD flit is used differently
-// depending on the input port.
+// credit_return_valid is registered: `credit_return_valid <= fetch`. A credit
+// therefore means "one FIFO slot was freed by a prefetch read", not "one
+// flit left the router". data_out is extra storage on top of the FIFO depth
+// and is not counted, so the downstream side sees depth+1 physical slots
+// against `depth` credits -- conservative by exactly one slot, which is what
+// makes the loop safe against the same-cycle arrival/departure case.
 //
-// For a LOCAL input port, route_compute determines this router's output
-// direction directly from the packet destination.
+// Registering also keeps the credit wire off this module's combinational
+// path (assumption D4 in the spec).
 //
-// For a directional input port, the ROUTE field in the incoming HEAD was
-// computed by the upstream router and already represents the route for this
-// router. route_compute therefore treats that field as route_self.
-//
-// route_compute also produces route_next, which is the lookahead route for
-// the router one hop downstream. route_next is exposed directly from this
-// module and may be inserted into the outgoing header by the final pipeline
-// stage.
 //
 // Flit format
 // -----------
 //
 // HEAD / HEAD_TAIL:
 //
-//   [31:14] RESERVED
+//   [31:14] RESERVED (HEAD_TAIL: 18-bit payload)
 //   [13:10] ROUTE
-//   [9:7]   DEST_Y
-//   [6:4]   DEST_X
-//   [3:2]   RESERVED
-//   [1:0]   FLIT_TYPE
+//    [9:7]  DEST_Y
+//    [6:4]  DEST_X
+//    [3:2]  VC_ID   -- ignored by routers; the sideband vc_id is
+//                     authoritative (assumption D3) and header merge at the
+//                     output port never rewrites this field
+//    [1:0]  FLIT_TYPE
 //
 // BODY / TAIL:
 //
 //   [31:2]  PAYLOAD
-//   [1:0]   FLIT_TYPE
+//    [1:0]  FLIT_TYPE
 //
-// VC ID is link-level information and is not stored in the flit.
+// The VC ID is link-level sideband information and is not stored in the flit.
 //
-// FIFO timing
-// -----------
-// The FIFO has a registered data_out. A read issued in one cycle therefore
-// makes the corresponding flit available at data_out in the following cycle.
 //
-// The input port keeps a delayed copy of the FIFO read enable so that
-// head_valid is asserted in the same cycle that the newly fetched flit is
-// available at fifo_data_out.
+// Type encoding shortcuts
+// -----------------------
+//   00 BODY       is_head = 0  is_last = 0
+//   01 HEAD       is_head = 1  is_last = 0
+//   10 TAIL       is_head = 0  is_last = 1
+//   11 HEAD_TAIL  is_head = 1  is_last = 1
 //
-// The FIFO also supports an empty-FIFO write/read bypass. When a flit arrives
-// at an empty VC while that VC is being fetched, the FIFO forwards the flit
-// directly to data_out. The same one-cycle timing relationship applies.
+// i.e. is_head = type[0] and is_last = type[1]. Both shortcuts depend on this
+// exact encoding, so an assertion at the bottom of the file pins it down.
+//
 //
 // Dependencies
 // ------------
 //   fifo
-//       Synchronous per-VC FIFO.
+//       Synchronous per-VC FIFO. Registered data_out, empty-bypass, and
+//       rejects reads on empty with no simultaneous write.
 //
 //   route_compute
-//       Combinational routing and lookahead computation.
+//       Pure combinational routing + lookahead. Combinational passthrough,
+//       never latches anything.
+//
+// See also: linnea_router_implementation_spec.md sections 4.2, 5, 6, 9.
 //------------------------------------------------------------------------------
 
 module noc_input_port #(
@@ -106,6 +155,10 @@ module noc_input_port #(
 
     //--------------------------------------------------------------------------
     // Incoming link
+    //
+    // vc_id is sideband: it selects which per-VC FIFO receives this flit. It
+    // is authoritative for routing/flow-control purposes; the VC_ID field
+    // inside a HEAD flit is stale after the first hop and is ignored.
     //--------------------------------------------------------------------------
 
     input logic [31:0] flit_data,
@@ -115,60 +168,68 @@ module noc_input_port #(
     //--------------------------------------------------------------------------
     // Credit return to the upstream router
     //
-    // A credit is returned whenever a flit is removed from one of the
-    // per-VC input FIFOs.
+    // One bit per VC, so two VCs may free a slot in the same cycle. Asserted
+    // the cycle AFTER the fetch that freed the slot (registered).
     //--------------------------------------------------------------------------
 
     output logic [NUM_VC-1:0] credit_return_valid,
-    output logic [1:0]        credit_return_vc_id [NUM_VC],
 
     //--------------------------------------------------------------------------
-    // Requests to the router arbitration logic
+    // Virtual-channel allocation (VA) interface
     //
-    // req_va:
-    //     Requests output-VC allocation for a new packet.
-    //
-    // req_sa:
-    //     Requests switch access for a packet which already owns an output VC.
-    //
-    // req_out_port:
-    //     Current router output required by the packet.
-    //
-    // req_flit_type:
-    //     Type of the currently active flit.
+    // va_req[v]         this VC holds a HEAD/HEAD_TAIL and does not yet own
+    //                   a downstream VC.
+    // va_req_out_port[v] the output port the packet needs from THIS router.
+    //                   Live RC output in the arrival cycle, the latched
+    //                   copy in every cycle after -- see the mux below.
+    // va_req_single[v]  the packet is a single flit (HEAD_TAIL). VA uses it
+    //                   as a priority tier so short packets jump ahead.
+    // va_gnt[v]         VA won this cycle; va_gnt_out_vc[v] says which
+    //                   downstream VC was assigned.
     //--------------------------------------------------------------------------
 
     output logic [NUM_VC-1:0] req_va,
+    output logic [3:0]        va_req_out_port  [NUM_VC],
+    output logic [NUM_VC-1:0] va_req_single,
+    input  logic [NUM_VC-1:0] va_gnt,
+    input  logic [1:0]        va_gnt_out_vc [NUM_VC],
+
+    //--------------------------------------------------------------------------
+    // Switch allocation (SA) interface
+    //
+    // sa_req[v]          this VC holds a flit AND owns a downstream VC.
+    // sa_req_out_port[v] which output port it wants (stage-2 target).
+    // sa_req_out_vc[v]   which downstream VC it targets (credit mask index).
+    // sa_req_last[v]     the active flit is the packet's last one (TAIL or
+    //                    HEAD_TAIL). The arbiter releases its output-VC
+    //                    reservation when it sees this AND grants.
+    // sa_gnt[v]          stage 2 granted this VC; its flit crosses this cycle.
+    // sa_pick[v]         stage 1 picked this VC; selects the pre-crossbar mux
+    //                    early so the data mux is not on the stage-2 path.
+    //                    sa_gnt implies sa_pick.
+    //--------------------------------------------------------------------------
+
     output logic [NUM_VC-1:0] req_sa,
-    output logic [3:0]        req_out_port  [NUM_VC],
-    output logic [1:0]        req_flit_type [NUM_VC],
+    output logic [3:0]        sa_req_out_port [NUM_VC],
+    output logic [1:0]        sa_req_out_vc   [NUM_VC],
+    output logic [NUM_VC-1:0] sa_req_last,
+    input  logic [NUM_VC-1:0] sa_gnt,
+    input  logic [NUM_VC-1:0] sa_pick,
 
     //--------------------------------------------------------------------------
-    // Arbitration grants
+    // Crossbar-facing datapath
     //
-    // va_grant_out_vc identifies the output-side VC assigned to each input VC.
-    //--------------------------------------------------------------------------
-
-    input logic [NUM_VC-1:0] va_grant,
-    input logic [1:0]        va_grant_out_vc [NUM_VC],
-    input logic [NUM_VC-1:0] sa_grant,
-
-    //--------------------------------------------------------------------------
-    // Switch traversal interface
-    //--------------------------------------------------------------------------
-
-    output logic [31:0] st_flit_data [NUM_VC],
-    output logic [1:0]  st_flit_type [NUM_VC],
-
-    //--------------------------------------------------------------------------
-    // Lookahead route
+    // Single post-mux outputs. The OR-mux over VCs is resolved here (driven
+    // by sa_pick) so the crossbar only has to mux across input PORTS, which
+    // keeps the 5:1 crossbar mux from stacking a 2:1 VC mux inside it.
     //
-    // route_next is generated combinationally by route_compute. It describes
-    // the route to be taken at the next router and is intended to be consumed
-    // by the outgoing pipeline/header-merge stage.
+    // st_route_next is the lookahead route for the downstream router; the
+    // output port merges it into [13:10] of a HEAD flit as it loads the link
+    // register.
     //--------------------------------------------------------------------------
 
-    output logic [3:0] route_next [NUM_VC]
+    output logic [31:0] st_flit_data,
+    output logic [3:0]  st_route_next
 );
 
 
@@ -181,6 +242,8 @@ module noc_input_port #(
   localparam logic [1:0] FLIT_TAIL      = 2'b10;
   localparam logic [1:0] FLIT_HEAD_TAIL = 2'b11;
 
+  // One-hot direction encoding. LOCAL is all-zero so that "not a direction"
+  // and "LOCAL" coincide, which makes the reset value of out_port meaningful.
   localparam logic [3:0] DIR_LOCAL = 4'b0000;
   localparam logic [3:0] DIR_NORTH = 4'b0001;
   localparam logic [3:0] DIR_EAST  = 4'b0010;
@@ -190,32 +253,43 @@ module noc_input_port #(
 
   //===========================================================================
   // Per-VC control state
+  //
+  // Everything below is a per-VC register. There is no cross-VC state: two
+  // VCs on the same port may be at completely different points in a packet's
+  // lifetime simultaneously, which is the entire point of having them.
   //===========================================================================
 
-  // Indicates that fifo_data_out contains the currently active flit for
-  // this VC.
+  // head_valid: data_out holds an active, fetched flit. High in the ARRIVAL
+  // cycle (t+1 after a fetch in t), aligned with the data itself.
   logic [NUM_VC-1:0] head_valid;
 
-  // Previous-cycle value of head_valid. Used to identify the arrival of a
-  // newly fetched head flit.
-  logic [NUM_VC-1:0] head_valid_d1;
-
-  // Delayed FIFO read indication. The FIFO produces registered output data,
-  // so this signal aligns the read request with the fetched flit.
-  logic [NUM_VC-1:0] fifo_rd_enable_d1;
-
-  // Output port selected for the current packet.
+  // arrive: registered fetch. High in exactly the cycle a freshly fetched
+  // flit appears on data_out. This is the single event that says "new flit".
   //
-  // This is captured when the packet's HEAD becomes active and remains
-  // associated with the VC for the lifetime of the packet.
-  logic [3:0] own_route [NUM_VC];
+  // Note this is the same register as the old `fifo_rd_enable_d1`; it was
+  // renamed because what it means is now load-bearing -- it drives route
+  // capture and the live VA output-port mux -- not merely "delayed read".
+  logic [NUM_VC-1:0] arrive;
 
-  // Output-side VC assigned to this input VC during virtual-channel
-  // allocation.
+  // out_port: output port of the packet currently at the head of this VC.
+  // Captured from route_compute on the arrival cycle and held until the
+  // packet's last flit leaves. (Was named `own_route`.)
+  logic [3:0] out_port [NUM_VC];
+
+  // out_vc: output-side VC assigned during VA. Held for the packet's life.
   logic [1:0] out_vc [NUM_VC];
 
-  // Indicates that this VC currently owns a valid output VC assignment.
+  // assignment_valid: this VC's packet owns a downstream VC, so it is
+  // allowed to ask for the switch. Cleared when the last flit is granted.
   logic [NUM_VC-1:0] assignment_valid;
+
+  // in_pkt: VERIFICATION ONLY -- no datapath logic reads it. High while this
+  // VC is between a HEAD and its TAIL, meaning the flits still to come must
+  // be BODY or TAIL. It exists so that the sequence assertion at the bottom
+  // of this file can state the rule in the same vocabulary the spec uses
+  // ("flit sequence is HEAD, BODY*, TAIL") rather than restating the type
+  // encoding at every use.
+  logic [NUM_VC-1:0] in_pkt;
 
 
   //===========================================================================
@@ -223,7 +297,7 @@ module noc_input_port #(
   //===========================================================================
 
   logic [NUM_VC-1:0] fifo_wr_enable;
-  logic [NUM_VC-1:0] fifo_rd_enable;
+  logic [NUM_VC-1:0] fetch;  // == fifo_rd_enable, by construction
 
   logic [31:0] fifo_data_out [NUM_VC];
 
@@ -241,22 +315,36 @@ module noc_input_port #(
 
   // ROUTE field carried by an incoming HEAD.
   //
-  // For directional input ports this represents the current router's route,
-  // as calculated by the upstream router.
+  // For a directional input port this is THIS router's route -- the upstream
+  // router already computed it (lookahead) and put it in the header, so
+  // route_compute just reads the field instead of recomputing.
   //
-  // For the LOCAL input port route_compute calculates route_self directly,
-  // so this field is ignored by route_compute.
+  // For the LOCAL input port there is no upstream header yet, so
+  // route_compute computes route_self fresh from the destination and this
+  // field is structurally ignored (IS_LOCAL_PORT=1).
   logic [3:0] rc_route_in [NUM_VC];
 
-  // Current router's route for each VC.
+  // This router's exit port for the packet, combinationally.
   logic [3:0] rc_route_self [NUM_VC];
 
-  // Decoded type of the active flit.
-  logic [1:0] flit_type [NUM_VC];
+  // Lookahead route for the router one hop downstream, combinationally.
+  logic [3:0] rc_route_next [NUM_VC];
 
 
   //===========================================================================
-  // Per-VC datapath and combinational control
+  // Active-flit decode
+  //
+  // Derived from data_out, so these are only meaningful while head_valid is
+  // asserted. Everything that consumes them gates on head_valid.
+  //===========================================================================
+
+  logic [1:0] flit_type [NUM_VC];
+  logic [NUM_VC-1:0] is_head;  // HEAD or HEAD_TAIL   == flit_type[0]
+  logic [NUM_VC-1:0] is_last;  // TAIL or HEAD_TAIL   == flit_type[1]
+
+
+  //===========================================================================
+  // Per-VC datapath and request generation
   //===========================================================================
 
   genvar i;
@@ -268,33 +356,46 @@ module noc_input_port #(
       //=======================================================================
       // Incoming flit demultiplex
       //
-      // Each incoming flit is written only into the FIFO selected by the
-      // link-level VC identifier.
+      // Each link flit is written only into the FIFO selected by the
+      // sideband vc_id. There is no VC_TAG decoding of the flit payload.
       //=======================================================================
 
       always_comb begin
-        fifo_wr_enable[i] = flit_valid && (vc_id == i);
+        fifo_wr_enable[i] = flit_valid && (vc_id == 2'(i));
       end
 
 
       //=======================================================================
-      // FIFO fetch
+      // Fetch  (spec equation: option ii)
       //
-      // A new flit is fetched when this VC has no currently active flit and
-      // data is available either in the FIFO or directly on the incoming link.
+      //   fetch = (!head_valid || sa_gnt) && (!fifo_empty || fifo_wr_enable)
       //
-      // The second case makes use of the FIFO's empty-FIFO bypass.
+      // Clause 1 -- the head register is free: either idle, or its occupant
+      // is being switched out this very cycle.
+      //
+      // Clause 2 -- there is something to fetch: a buffered flit, or a flit
+      // landing on the link right now that the FIFO will bypass straight to
+      // data_out.
+      //
+      // There is no combinational loop through sa_gnt: sa_gnt is a function
+      // of REGISTERED state only (sa_req comes from head_valid and
+      // assignment_valid, credits are counters), so it is already settled by
+      // the time this expression evaluates.
       //=======================================================================
 
       always_comb begin
-        fifo_rd_enable[i] =
-            !head_valid[i] &&
-            (!fifo_empty[i] || fifo_wr_enable[i]);
+        fetch[i] = (!head_valid[i] || sa_gnt[i]) &&
+                   (!fifo_empty[i] || fifo_wr_enable[i]);
       end
 
 
       //=======================================================================
       // Per-VC FIFO
+      //
+      // DEPTH = 8 buffer slots. With data_out acting as a ninth slot, the
+      // downstream side holds 9 physical positions against the 8 credits it
+      // is issued -- one slot of slack, which is what absorbs a credit
+      // returning in the same cycle a flit is being consumed.
       //=======================================================================
 
       fifo #(
@@ -305,7 +406,7 @@ module noc_input_port #(
           .rst_n     (rst_n),
 
           .wr_enable (fifo_wr_enable[i]),
-          .rd_enable (fifo_rd_enable[i]),
+          .rd_enable (fetch[i]),
 
           .data_in   (flit_data),
           .data_out  (fifo_data_out[i]),
@@ -319,9 +420,9 @@ module noc_input_port #(
       //=======================================================================
       // Flit field extraction
       //
-      // Routing metadata is meaningful for HEAD and HEAD_TAIL flits.
-      // BODY and TAIL flits use the remaining packet context stored in the
-      // per-VC control state.
+      // Routing metadata is only meaningful for HEAD and HEAD_TAIL; for BODY
+      // and TAIL these bits are payload and get ignored because every request
+      // below is gated on head_valid (and, for VA, on is_head).
       //=======================================================================
 
       always_comb begin
@@ -330,14 +431,21 @@ module noc_input_port #(
         rc_route_in[i] = fifo_data_out[i][13:10];
         rc_dest_y[i]   = fifo_data_out[i][9:7];
         rc_dest_x[i]   = fifo_data_out[i][6:4];
+
+        is_head[i]     = flit_type[i][0];
+        is_last[i]     = flit_type[i][1];
       end
 
 
       //=======================================================================
       // Route computation
       //
-      // route_self identifies the output port required at this router.
-      // route_next identifies the route required at the downstream router.
+      // route_self: the output port THIS router needs for this packet.
+      // route_next: the route the NEXT router will need -- lookahead, so the
+      //             downstream router's RC never sits on a critical path.
+      //
+      // Both are combinational and only meaningful against a HEAD header on
+      // data_out; they are re-evaluated every cycle for free.
       //=======================================================================
 
       route_compute #(
@@ -350,63 +458,84 @@ module noc_input_port #(
           .route_in   (rc_route_in[i]),
 
           .route_self (rc_route_self[i]),
-          .route_next (route_next[i])
+          .route_next (rc_route_next[i])
       );
 
 
       //=======================================================================
-      // Virtual-channel allocation request
+      // VA request
       //
-      // Only a packet's first flit requests VA. Once an output VC has been
-      // assigned, subsequent BODY and TAIL flits retain that assignment.
-      //=======================================================================
-
-      always_comb begin
-        req_va[i] =
-            head_valid[i] &&
-            ((flit_type[i] == FLIT_HEAD) ||
-             (flit_type[i] == FLIT_HEAD_TAIL)) &&
-            !assignment_valid[i];
-      end
-
-
-      //=======================================================================
-      // Switch allocation request
+      //   va_req = head_valid && !assignment_valid && is_head
       //
-      // A VC requests the switch once it owns an output VC.
-      //=======================================================================
-
-      always_comb begin
-        req_sa[i] =
-            head_valid[i] &&
-            assignment_valid[i];
-      end
-
-
-      //=======================================================================
-      // Credit return
+      // A VC asks for a downstream VC exactly once per packet: when the HEAD
+      // is active and no assignment exists yet. BODY/TAIL never ask (they
+      // inherit the assignment), and a VC mid-packet never re-asks.
       //
-      // Reading one entry from the input FIFO frees one buffer slot, allowing
-      // the upstream router to send another flit into this VC.
+      // va_req_single marks HEAD_TAIL so the allocator can give single-flit
+      // packets the higher tier -- they hold an output VC for exactly one
+      // cycle, so promoting them costs the winner almost nothing.
       //=======================================================================
 
       always_comb begin
-        credit_return_valid[i] = fifo_rd_enable[i];
-        credit_return_vc_id[i] = i[1:0];
+        req_va[i]       = head_valid[i] && !assignment_valid[i] && is_head[i];
+        va_req_single[i] = (flit_type[i] == FLIT_HEAD_TAIL);
       end
 
 
       //=======================================================================
-      // Arbiter and switch-facing outputs
+      // VA output-port request  (the arrival-cycle live mux)
+      //
+      //   va_req_out_port = arrive ? rc_route_self : out_port
+      //
+      // In the arrival cycle out_port still holds the PREVIOUS packet's
+      // route (or LOCAL, out of reset), but route_compute is already valid
+      // against the new header -- so we take the combinational value.
+      //
+      // From the next cycle on, out_port has been latched from that very
+      // value, so we read the register instead. The two sides are the same
+      // number by construction; the mux exists purely to avoid one cycle of
+      // dead time between "flit arrives" and "route is requestable".
+      //
+      // This matters concretely: without the mux, a HEAD arriving into an
+      // idle VC would request VA against out_port = LOCAL and win an
+      // allocation it has no business having.
       //=======================================================================
 
       always_comb begin
-        req_out_port[i]  = own_route[i];
-        req_flit_type[i] = flit_type[i];
-
-        st_flit_data[i]  = fifo_data_out[i];
-        st_flit_type[i]  = flit_type[i];
+        va_req_out_port[i] = arrive[i] ? rc_route_self[i] : out_port[i];
       end
+
+
+      //=======================================================================
+      // SA request
+      //
+      //   sa_req          = head_valid && assignment_valid
+      //   sa_req_out_port = out_port      (latched, stable for the packet)
+      //   sa_req_out_vc   = out_vc        (credit-mask index)
+      //   sa_req_last     = is_last       (TAIL or HEAD_TAIL)
+      //
+      // sa_req_last is a level, not a pulse: it is asserted for as long as
+      // the last flit sits at the head. The arbiter ANDs it with its own
+      // grant to decide when to release the output VC, so a stalled TAIL
+      // cannot release anything.
+      //=======================================================================
+
+      always_comb begin
+        req_sa[i]          = head_valid[i] && assignment_valid[i];
+        sa_req_out_port[i] = out_port[i];
+        sa_req_out_vc[i]   = out_vc[i];
+        sa_req_last[i]     = is_last[i];
+      end
+
+
+      //=======================================================================
+      // Arbiter-facing flit type
+      //
+      // Exposed only as the two single-bit shortcuts; the arbiter never needs
+      // the full 2-bit type (req_flit_type's original 2-bit form was
+      // replaced by va_req_single + sa_req_last, which are the only two
+      // distinctions it acts on).
+      //=======================================================================
 
     end
 
@@ -414,59 +543,103 @@ module noc_input_port #(
 
 
   //===========================================================================
-  // Head tracking and route capture
+  // Head tracking, route capture, and credit return
+  //
+  // One process owns all three because they all key off the same events
+  // (fetch and sa_gnt) and their relative priority is the whole ballgame.
+  //
+  // RESET STYLE: synchronous active-low, matching `fifo.sv`. The FIFO is a
+  // verified module whose reset style is fixed, so this module adopts it
+  // rather than the other way round. Mixing async-reset flops with
+  // sync-reset flops on the same reset net is a classic synthesis surprise
+  // (recovery/removal violations on the async ones, none on the sync ones),
+  // so every sequential block in this design uses `@(posedge clk)` + `if
+  // (!rst_n)`. Follow this convention in the arbiter and output port too.
   //===========================================================================
 
-  integer v;
-
-  always_ff @(posedge clk or negedge rst_n) begin
+  always_ff @(posedge clk) begin
 
     if (!rst_n) begin
 
-      head_valid        <= '0;
-      head_valid_d1     <= '0;
-      fifo_rd_enable_d1 <= '0;
+      head_valid          <= '0;
+      arrive              <= '0;
+      credit_return_valid <= '0;
+      in_pkt              <= '0;
 
-      for (v = 0; v < NUM_VC; v = v + 1) begin
-        own_route[v] <= DIR_LOCAL;
+      for (int v = 0; v < NUM_VC; v++) begin
+        out_port[v] <= DIR_LOCAL;
       end
 
     end
 
     else begin
 
-      // The FIFO output becomes valid one cycle after the read request.
-      fifo_rd_enable_d1 <= fifo_rd_enable;
+      //---------------------------------------------------------------------
+      // arrive and credit return are both straight registrations of fetch.
+      //
+      // arrive          -> marks the cycle the fetched flit is on data_out
+      // credit_return   -> tells upstream a FIFO slot was freed, one cycle
+      //                    after the read that freed it (assumption D4)
+      //---------------------------------------------------------------------
 
-      // Preserve the previous head state for transition detection.
-      head_valid_d1 <= head_valid;
+      arrive              <= fetch;
+      credit_return_valid <= fetch;
 
-      for (v = 0; v < NUM_VC; v = v + 1) begin
+      for (int v = 0; v < NUM_VC; v++) begin
 
-        // A fetched FIFO entry becomes the active flit for this VC.
-        if (fifo_rd_enable_d1[v]) begin
+        //-------------------------------------------------------------------
+        // head_valid: fetch MUST win over sa_gnt.
+        //
+        // When both happen in the same cycle the next flit is already on its
+        // way to data_out, so the VC stays active. Written in this order --
+        // fetch first, grant second -- so that a grant arriving alongside a
+        // fetch cannot clear the flag the fetch just needs to set.
+        //
+        // With only `sa_gnt` clearing, and fetch gated on !head_valid, a
+        // back-to-back stream would advance one flit every three cycles:
+        // fetch, hold, grant, fetch... The `|| sa_gnt` term in fetch is what
+        // lets a grant and a fetch share a cycle at all.
+        //-------------------------------------------------------------------
+
+        if (fetch[v]) begin
           head_valid[v] <= 1'b1;
         end
-
-        // A successful switch traversal consumes the active flit.
-        //
-        // This assignment follows the fetch condition so that retirement
-        // takes priority if both events are presented in the same cycle.
-        if (sa_grant[v]) begin
+        else if (sa_gnt[v]) begin
           head_valid[v] <= 1'b0;
         end
 
-        // Capture the route when a newly fetched packet head becomes active.
+        //-------------------------------------------------------------------
+        // Route capture on the ARRIVAL event, not on a head_valid edge.
         //
-        // route_compute supplies the appropriate route for both local
-        // injection and directional input ports.
-        if (head_valid[v] &&
-            !head_valid_d1[v] &&
-            ((flit_type[v] == FLIT_HEAD) ||
-             (flit_type[v] == FLIT_HEAD_TAIL))) begin
+        // arrive && is_head is true in exactly one cycle per packet head:
+        // the cycle its header sits on data_out with route_compute live.
+        // A head_valid rising edge would be wrong twice over -- it also
+        // fires for the first flit of a packet when head_valid had already
+        // been high from the previous flit, and it fires one cycle later
+        // than the RC output it is trying to capture.
+        //-------------------------------------------------------------------
 
-          own_route[v] <= rc_route_self[v];
+        if (arrive[v] && is_head[v]) begin
+          out_port[v] <= rc_route_self[v];
+        end
 
+        //-------------------------------------------------------------------
+        // Packet-boundary tracker (verification only -- see the declaration).
+        //
+        // Advances on `arrive`, which pulses exactly once per flit actually
+        // fetched, so it observes every flit on this VC exactly once and in
+        // order. That is the property the sequence assertion below is
+        // policing: no flit skipped, none seen twice.
+        //
+        //   HEAD        starts a packet that continues
+        //   HEAD_TAIL   is the entire packet, so nothing is left open
+        //   BODY        continues whatever is open
+        //   TAIL        closes it
+        //-------------------------------------------------------------------
+
+        if (arrive[v]) begin
+          if (is_head[v]) in_pkt[v] <= !is_last[v];
+          else if (is_last[v]) in_pkt[v] <= 1'b0;
         end
 
       end
@@ -476,16 +649,26 @@ module noc_input_port #(
 
 
   //===========================================================================
-  // Output VC assignment state
+  // Output-VC assignment state
+  //
+  // VA and SA release the same bit from opposite ends:
+  //   set   by va_gnt   (packet acquired a downstream VC)
+  //   clear by sa_gnt && is_last (packet's final flit switched out)
+  //
+  // These are written as two separate `if`s rather than if/else because they
+  // genuinely cannot overlap for the same VC in the same cycle -- a VC
+  // cannot be acquiring an assignment and releasing one simultaneously --
+  // but the last-write-wins ordering below makes the outcome well defined
+  // regardless of which convention a future edit assumes.
   //===========================================================================
 
-  always_ff @(posedge clk or negedge rst_n) begin
+  always_ff @(posedge clk) begin
 
     if (!rst_n) begin
 
       assignment_valid <= '0;
 
-      for (v = 0; v < NUM_VC; v = v + 1) begin
+      for (int v = 0; v < NUM_VC; v++) begin
         out_vc[v] <= '0;
       end
 
@@ -493,20 +676,18 @@ module noc_input_port #(
 
     else begin
 
-      for (v = 0; v < NUM_VC; v = v + 1) begin
+      for (int v = 0; v < NUM_VC; v++) begin
 
-        // Capture the output VC selected by virtual-channel allocation.
-        if (va_grant[v]) begin
+        // Capture the output VC the allocator assigned.
+        if (va_gnt[v]) begin
           assignment_valid[v] <= 1'b1;
-          out_vc[v]            <= va_grant_out_vc[v];
+          out_vc[v]           <= va_gnt_out_vc[v];
         end
 
-        // The output VC remains reserved until the packet's final flit
-        // traverses the switch.
-        if (sa_grant[v] &&
-            ((flit_type[v] == FLIT_TAIL) ||
-             (flit_type[v] == FLIT_HEAD_TAIL))) begin
-
+        // Release on the packet's final flit. HEAD_TAIL qualifies as last
+        // through is_last, so a single-flit packet sets and clears this in
+        // two consecutive cycles without any special-casing.
+        if (sa_gnt[v] && is_last[v]) begin
           assignment_valid[v] <= 1'b0;
         end
 
@@ -515,5 +696,195 @@ module noc_input_port #(
     end
 
   end
+
+
+  //===========================================================================
+  // Crossbar-facing OR-mux
+  //
+  // sa_pick is one-hot across this port's VCs (guaranteed by SA stage 1 and
+  // checked below), so OR-ing the masked contributions selects exactly the
+  // picked VC and yields 0 when nothing is picked -- which the crossbar
+  // ignores because st_valid is low in that case.
+  //
+  // Driving this here rather than in the crossbar keeps the crossbar a pure
+  // 5:1 mux across input PORTS, and puts the VC selection as close to its
+  // source as possible.
+  //===========================================================================
+
+  always_comb begin
+
+    st_flit_data = '0;
+    st_route_next = '0;
+
+    // Plain accumulator: seed with zero, OR in each masked contribution.
+    // The self-read on the `|=` is safe because the seed assignment happens
+    // first in the same evaluation, so there is no combinational feedback.
+    for (int v = 0; v < NUM_VC; v++) begin
+      if (sa_pick[v]) begin
+        st_flit_data  |= fifo_data_out[v];
+        st_route_next |= rc_route_next[v];
+      end
+    end
+
+  end
+
+
+  //===========================================================================
+  // Assertions
+  //
+  // SVA, unconditional. Verilator parses it today and VCS will later; there
+  // is deliberately no per-simulator conditional anywhere in the RTL.
+  //===========================================================================
+
+  //-------------------------------------------------------------------------
+  // Elaboration-time: pin the flit type encoding table (spec section 2).
+  //
+  // is_head/is_last below are dynamic checks that the LOGIC honours these
+  // constants; this one is a static check that the CONSTANTS themselves still
+  // match the table. Both are needed: editing FLIT_TAIL alone would pass the
+  // dynamic check while silently disagreeing with every other module and
+  // testbench that hard-codes 2'b10.
+  //-------------------------------------------------------------------------
+  initial begin
+    assert ((FLIT_BODY == 2'b00) && (FLIT_HEAD == 2'b01) &&
+            (FLIT_TAIL == 2'b10) && (FLIT_HEAD_TAIL == 2'b11))
+      else $error("noc_input_port: flit type constants have drifted from the spec encoding");
+  end
+
+  genvar g;
+
+  generate
+    for (g = 0; g < NUM_VC; g = g + 1) begin : gen_assert_vc
+
+      // -- Grant/ request consistency -------------------------------------
+      // A grant with no outstanding request means the arbiter and this module
+      // disagree about the state of the VC. This is seam #6 in the spec.
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       va_gnt[g] |-> req_va[g])
+        else $error("noc_input_port: va_gnt without va_req on VC %0d", g);
+
+      // sa_gnt implies sa_req: the arbiter cannot switch a flit this module
+      // did not offer.
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       sa_gnt[g] |-> req_sa[g])
+        else $error("noc_input_port: sa_gnt without sa_req on VC %0d", g);
+
+      // Seam #6: stage 2 must select a VC stage 1 already picked. st_flit_data
+      // is muxed by sa_pick, so a sa_gnt without sa_pick would switch garbage.
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       sa_gnt[g] |-> sa_pick[g])
+        else $error("noc_input_port: sa_gnt without sa_pick on VC %0d", g);
+
+      // -- Fetch legality --------------------------------------------------
+      // Two independent conditions, each with its own message because when
+      // one fires you want to know *which* half of the fetch rule broke:
+      //
+      //   the head register must be free (idle, or draining this cycle), and
+      //   there must be something to fetch (buffered, or bypassing in).
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       fetch[g] |-> (!head_valid[g] || sa_gnt[g]))
+        else $error("noc_input_port: fetch with head register stuck on VC %0d", g);
+
+      // Reading an empty FIFO is only legal when a write is bypassing past
+      // it in the same cycle; otherwise the FIFO has no word to hand over.
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       fetch[g] |-> (!fifo_empty[g] || fifo_wr_enable[g]))
+        else $error("noc_input_port: fetch from empty VC %0d with no bypass write", g);
+
+      // -- FIFO protocol violations must be unreachable --------------------
+      // `full` may legitimately be reached (all 8 slots occupied), but
+      // writing into it means the arbiter handed out more credits than the
+      // downstream buffer has slots. Credit accounting, not this module, is
+      // what is being indicted when this fires.
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       !(fifo_wr_enable[g] && fifo_full[g]))
+        else $error("noc_input_port: wrote into full VC %0d FIFO - credit accounting broken", g);
+
+      // `err` is the FIFO's own union of the two illegal operations. Asserting
+      // it separately from the two checks above is deliberate belt-and-braces:
+      // if the FIFO's idea of a violation ever drifts from this module's idea
+      // of the protocol, one of the three catches it.
+      assert property (@(posedge clk) disable iff (!rst_n) !fifo_err[g])
+        else $error("noc_input_port: FIFO raised err on VC %0d", g);
+
+      // -- Output-VC assignment integrity ---------------------------------
+      // A VA grant while an assignment is already live would leak the old
+      // downstream VC (two packets believing they own it).
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       va_gnt[g] |-> !assignment_valid[g])
+        else $error("noc_input_port: va_gnt while assignment already valid on VC %0d", g);
+
+      // out_vc must have been written before anything can depend on it.
+      // Note: $isunknown is trivially false in a 2-state simulator, so this
+      // only has teeth under VCS -- kept deliberately, since that is where
+      // the network will ultimately be verified.
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       assignment_valid[g] |-> !$isunknown(out_vc[g]))
+        else $error("noc_input_port: out_vc unknown while assignment valid on VC %0d", g);
+
+      // -- Type encoding ---------------------------------------------------
+      // is_head gates VA eligibility and route capture; is_last tells the
+      // arbiter when to release the output VC. Both shortcuts are stated
+      // against the named constants rather than raw bit positions so that a
+      // change to the encoding has to be made deliberately, next to the
+      // comment that explains why it is safe.
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       head_valid[g] |->
+                         (is_head[g] === ((flit_type[g] == FLIT_HEAD) ||
+                                          (flit_type[g] == FLIT_HEAD_TAIL))) &&
+                         (is_last[g] === ((flit_type[g] == FLIT_TAIL) ||
+                                          (flit_type[g] == FLIT_HEAD_TAIL))))
+        else $error("noc_input_port: flit type encoding broken on VC %0d: type=%b",
+                    g, flit_type[g]);
+
+      // -- Out_port must be a legal direction -----------------------------
+      // Checked against the five legal codes, not merely "one-hot", so that a
+      // corrupted value like 4'b0011 (which is one-hot-ish in the wrong way)
+      // is caught too.
+      //
+      // Written out as a chain of == rather than `inside { ... }`: the
+      // inside operator lowers to a wildcard equality against a concatenation,
+      // and the tool refuses that form when it appears inside a property.
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       head_valid[g] |->
+                         ((out_port[g] == DIR_LOCAL) || (out_port[g] == DIR_NORTH) ||
+                          (out_port[g] == DIR_EAST)  || (out_port[g] == DIR_WEST)  ||
+                          (out_port[g] == DIR_SOUTH)))
+        else $error("noc_input_port: out_port not a legal direction on VC %0d: %b",
+                    g, out_port[g]);
+
+      // -- Flit sequence: HEAD, BODY*, TAIL (section 8) --------------------
+      //
+      // Sampled on `arrive`, which pulses exactly once per flit fetched, so
+      // this sees every flit on this VC once and in order. `in_pkt` still
+      // holds the state from BEFORE this flit, because the sequential block
+      // updates it at this same edge -- which is precisely the "what was I
+      // expecting next?" answer the check needs.
+      //
+      // The two ways this fails are the two that matter:
+      //   a continuation flit while no packet is open  -> a header was lost
+      //   a head flit while a packet is still open     -> a second header,
+      //                                                   or a flit seen twice
+      assert property (@(posedge clk) disable iff (!rst_n)
+                       arrive[g] |-> (in_pkt[g] ? !is_head[g] : is_head[g]))
+        else $error("noc_input_port: flit sequence broken on VC %0d: type=%b while in_pkt=%b",
+                    g, flit_type[g], in_pkt[g]);
+
+    end
+
+    // -- sa_pick is one-hot at most ----------------------------------------
+    // Not exactly one: when the port has nothing to offer, stage 1 picks
+    // nothing and all bits are 0.
+    assert property (@(posedge clk) disable iff (!rst_n)
+                     $countones(sa_pick) <= 1)
+      else $error("noc_input_port: sa_pick not one-hot: %b", sa_pick);
+
+    // At most one VC on this port may be switched in a cycle -- the port has
+    // a single 32-bit datapath to the crossbar.
+    assert property (@(posedge clk) disable iff (!rst_n)
+                     $countones(sa_gnt) <= 1)
+      else $error("noc_input_port: multiple VCs granted on one port: %b", sa_gnt);
+
+  endgenerate
 
 endmodule

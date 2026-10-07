@@ -78,9 +78,242 @@ module tb_route_compute;
       .route_next(local_route_next)
   );
 
+  // ===============================================================
+  // Exhaustive coordinate sweep (spec section 10, step 2)
+  //
+  // The directed cases above are readable and explain intent, but they only
+  // sample a handful of coordinates. This block builds one instance of EACH
+  // port type for every point in the 3-bit coordinate space (8x8 = 64
+  // positions), so that a single pass over destinations and routes covers
+  // every (CUR, dest) pair the hardware can ever see -- 49k comparisons
+  // against the reference model below.
+  //
+  // The two port types differ only in how route_self is obtained, so both
+  // are swept through the same driver:
+  //
+  //   LOCAL  route_self computed from (CUR, dest); route_in is irrelevant,
+  //          which is itself under test -- it is driven to 4'bxxxx (which a
+  //          2-state engine folds to 4'b0000 = DIR_LOCAL, a *meaningful*
+  //          value), so an instance that wrongly reads route_in would
+  //          return LOCAL for a destination that is not CUR and fail.
+  //
+  //   RELAY  route_self must pass route_in straight through, and route_next
+  //          must be computed as if one hop had already been taken along it.
+  //          route_in sweeps all five codes including DIR_LOCAL, the
+  //          "arrives already terminating" edge case.
+  // ===============================================================
+
+  localparam int SWEEP_N = 8;  // 3-bit coordinate space: 0..7
+  localparam int SWEEP_INST = SWEEP_N * SWEEP_N;  // one instance per CUR point
+
+  // -------------------------------------------------------------------------
+  // Wiring rule for this bench -- every module port endpoint is a PLAIN
+  // SCALAR signal, never an element of an array.
+  //
+  // This is not a style preference, it is a hard requirement of the flow: an
+  // array element used directly as a port connection never sees a write made
+  // after time 0. The connection freezes at its initial value, the stimulus
+  // silently never reaches the DUT, and the bench then compares every
+  // instance against a permanently stale response while reporting ordinary
+  // assertion failures. Nothing warns you -- the first version of this sweep
+  // produced 37k failures that were entirely an artifact of the wiring.
+  //
+  // The workaround, in two parts:
+  //
+  //   * Stimulus: CUR_X/CUR_Y are elaboration-time parameters, so all 64
+  //     instances want the SAME inputs. Three shared plain scalars drive
+  //     every instance, and there is only one write per stimulus vector
+  //     instead of 64.
+  //
+  //   * Responses: each instance drives its own generate-scope scalar
+  //     (plain, so the port endpoint is fine), which a continuous assign
+  //     with a constant genvar index folds into a response bus. Reading that
+  //     bus procedurally then works normally.
+  //
+  // Index the response buses as [cur_x*SWEEP_N + cur_y].
+  // -------------------------------------------------------------------------
+
+  // ---- shared stimulus (plain scalars) ----
+  logic [2:0] sw_dest_x;
+  logic [2:0] sw_dest_y;
+  logic [3:0] sw_route_in;
+
+  // ---- response buses (packed vectors, fed by continuous assigns) ----
+  logic [SWEEP_INST-1:0][3:0] sw_r_self;
+  logic [SWEEP_INST-1:0][3:0] sw_r_next;
+  logic [SWEEP_INST-1:0][3:0] sw_l_self;
+  logic [SWEEP_INST-1:0][3:0] sw_l_next;
+
+  genvar gx, gy;
+  generate
+    for (gx = 0; gx < SWEEP_N; gx++) begin : gen_sw_x
+      for (gy = 0; gy < SWEEP_N; gy++) begin : gen_sw_y
+
+        // Plain scalars sitting directly on the DUT ports.
+        logic [3:0] r_self_i, r_next_i;
+        logic [3:0] l_self_i, l_next_i;
+
+        route_compute #(
+            .CUR_X(3'(gx)),
+            .CUR_Y(3'(gy)),
+            .IS_LOCAL_PORT(0)
+        ) u_sw_relay (
+            .dest_x    (sw_dest_x),
+            .dest_y    (sw_dest_y),
+            .route_in  (sw_route_in),
+            .route_self(r_self_i),
+            .route_next(r_next_i)
+        );
+
+        route_compute #(
+            .CUR_X(3'(gx)),
+            .CUR_Y(3'(gy)),
+            .IS_LOCAL_PORT(1)
+        ) u_sw_local (
+            .dest_x    (sw_dest_x),
+            .dest_y    (sw_dest_y),
+            .route_in  (sw_route_in),
+            .route_self(l_self_i),
+            .route_next(l_next_i)
+        );
+
+        // Constant genvar index, so the hierarchical reference is legal.
+        assign sw_r_self[gx*SWEEP_N+gy] = r_self_i;
+        assign sw_r_next[gx*SWEEP_N+gy] = r_next_i;
+        assign sw_l_self[gx*SWEEP_N+gy] = l_self_i;
+        assign sw_l_next[gx*SWEEP_N+gy] = l_next_i;
+
+      end
+    end
+  endgenerate
+
+  // ---------------------------------------------------------------
+  // Reference helpers -- independent reimplementations, never a call
+  // into the DUT.
+  // ---------------------------------------------------------------
+
+  // Walk one hop along a direction. Y grows downward, so increasing Y is
+  // SOUTH. Mirrors the hardware's step 2 (deriving downstream coordinates).
+  function automatic logic [2:0] step_x(input logic [2:0] x, input logic [3:0] dir);
+    if (dir == DIR_EAST)      step_x = x + 3'd1;
+    else if (dir == DIR_WEST) step_x = x - 3'd1;
+    else                      step_x = x;
+  endfunction
+
+  function automatic logic [2:0] step_y(input logic [2:0] y, input logic [3:0] dir);
+    if (dir == DIR_SOUTH)      step_y = y + 3'd1;
+    else if (dir == DIR_NORTH) step_y = y - 3'd1;
+    else                       step_y = y;
+  endfunction
+
+  // Expected lookahead: forced LOCAL when the packet terminates here (the
+  // next hop does not exist), otherwise the route a router one hop further
+  // along would compute.
+  function automatic logic [3:0] ref_next(input logic [2:0] cx, input logic [2:0] cy,
+                                          input logic [3:0] self, input logic [2:0] dx,
+                                          input logic [2:0] dy);
+    if (self == DIR_LOCAL) ref_next = DIR_LOCAL;
+    else ref_next = ref_dir(step_x(cx, self), step_y(cy, self), dx, dy);
+  endfunction
+
+  // Sweep index -> one-hot direction code (the five legal route_in values).
+  function automatic logic [3:0] dir_of(input int k);
+    case (k)
+      0:       dir_of = DIR_LOCAL;
+      1:       dir_of = DIR_NORTH;
+      2:       dir_of = DIR_EAST;
+      3:       dir_of = DIR_WEST;
+      default: dir_of = DIR_SOUTH;
+    endcase
+  endfunction
+
+  // ---------------------------------------------------------------
+  // Quiet comparison for the sweep.
+  //
+  // ~49k passes would be ~49k lines of log nobody reads, so only failures
+  // print. Bookkeeping still feeds the same counters the directed tests
+  // use, so the single summary at the end covers both.
+  // ---------------------------------------------------------------
+  task automatic cmp_sweep(input string what, input logic [3:0] actual,
+                           input logic [3:0] expected, input int cx, input int cy,
+                           input int dx, input int dy, input logic [3:0] route);
+    checks++;
+    if (actual !== expected) begin
+      errors++;
+      $display("[FAIL] %s : CUR=(%0d,%0d) dest=(%0d,%0d) route_in=4'b%b got=%b exp=%b",
+               what, cx, cy, dx, dy, route, actual, expected);
+    end
+  endtask
+
+  // ---------------------------------------------------------------
+  // The sweep itself.
+  //
+  // All 64 CUR positions are driven together because they share the same
+  // (dest, route_in) stimulus -- only CUR differs between them. One #1 per
+  // stimulus vector, then 64 comparisons, instead of one #1 per comparison.
+  // ---------------------------------------------------------------
+  task automatic run_sweep();
+    logic [3:0] ri, es, en;
+
+    $display("--- Exhaustive sweep over a %0d x %0d coordinate space ---",
+             SWEEP_N, SWEEP_N);
+
+    // ---- LOCAL: route_self must be computed, never read from route_in ----
+    for (int dx = 0; dx < SWEEP_N; dx++) begin
+      for (int dy = 0; dy < SWEEP_N; dy++) begin
+
+        sw_dest_x   = 3'(dx);
+        sw_dest_y   = 3'(dy);
+        sw_route_in = 4'bxxxx;  // must be ignored entirely
+        #1;
+
+        for (int cx = 0; cx < SWEEP_N; cx++) begin
+          for (int cy = 0; cy < SWEEP_N; cy++) begin
+            es = ref_dir(3'(cx), 3'(cy), 3'(dx), 3'(dy));
+            en = ref_next(3'(cx), 3'(cy), es, 3'(dx), 3'(dy));
+            cmp_sweep("local route_self", sw_l_self[cx*SWEEP_N+cy], es, cx, cy, dx, dy, 4'd0);
+            cmp_sweep("local route_next", sw_l_next[cx*SWEEP_N+cy], en, cx, cy, dx, dy, 4'd0);
+          end
+        end
+
+      end
+    end
+
+    // ---- RELAY: route_self is a pure pass-through of route_in ----
+    for (int k = 0; k < 5; k++) begin
+      ri = dir_of(k);
+
+      for (int dx = 0; dx < SWEEP_N; dx++) begin
+        for (int dy = 0; dy < SWEEP_N; dy++) begin
+
+          sw_dest_x   = 3'(dx);
+          sw_dest_y   = 3'(dy);
+          sw_route_in = ri;
+          #1;
+
+          for (int cx = 0; cx < SWEEP_N; cx++) begin
+            for (int cy = 0; cy < SWEEP_N; cy++) begin
+              en = ref_next(3'(cx), 3'(cy), ri, 3'(dx), 3'(dy));
+              cmp_sweep("relay route_self", sw_r_self[cx*SWEEP_N+cy], ri, cx, cy, dx, dy, 4'(k));
+              cmp_sweep("relay route_next", sw_r_next[cx*SWEEP_N+cy], en, cx, cy, dx, dy, 4'(k));
+            end
+          end
+
+        end
+      end
+    end
+
+    $display("    sweep complete: %0d comparisons", checks);
+  endtask
+
   initial begin
-    // Drive X on the unused input -- if route_self ever depends on it,
-    // this will show up as an X on the output and fail the check.
+    // Drive X on the unused input -- if route_self ever depends on it, this
+    // will show up as an X on the output and fail the check below.
+    //
+    // Under Verilator (2-state) an X is folded to 0, so this assignment is a
+    // no-op here. It is kept because it is exactly the check that will start
+    // working when the design moves to VCS, and because it documents the
+    // intent: IS_LOCAL_PORT=1 must never read route_in at all.
     local_route_in = 4'bxxxx;
 
     // ============= RELAY PORT (N/E/S/W) =============
@@ -190,6 +423,9 @@ module tb_route_compute;
     #1;
     check("local6 route_self", local_route_self, DIR_NORTH);
     check("local6 route_next", local_route_next, ref_dir(3'd3, 3'd2, local_dest_x, local_dest_y));
+
+    // ============= EXHAUSTIVE SWEEP =============
+    run_sweep();
 
     // ============= SUMMARY =============
     $display("----------------------------------------");
