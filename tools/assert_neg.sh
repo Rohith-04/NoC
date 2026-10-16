@@ -13,11 +13,14 @@
 #                                   noc_output_port
 #   3. top-level seam SVA           router_top
 #
-# One case per family-member file. Each case mutates the RTL so that the
-# watched behaviour is wrong, builds WITH --assert, runs, and greps for the
-# exact $error text of the assertion under test. If the message never appears
-# the case reports MISSED, which means either the mutation did not reach the
-# property or the property is vacuous -- both are bugs worth knowing about.
+# One case per family-member file -- more where a single file carries two
+# differently-shaped properties, as the arbiter now does (the credit gate and
+# linnea_v2 section 4.5's VC-matched grant). Each case mutates the RTL so
+# that the watched behaviour is wrong, builds WITH --assert, runs, and greps
+# for the exact $error text of the assertion under test. If the message never
+# appears the case reports MISSED, which means either the mutation did not
+# reach the property or the property is vacuous -- both are bugs worth
+# knowing about.
 #
 # Every mutation is restored from a backup before the next case, and the
 # script restores it again on exit so `git diff rtl/` stays clean.
@@ -54,7 +57,7 @@ PY
   rm -rf obj_dir/v_neg
   if ! verilator --binary --timing --trace --assert -Wall -Wno-BLKSEQ \
        -Wno-WIDTHEXPAND -Wno-UNUSEDSIGNAL -sv --top-module tb_$bench \
-       -Mdir obj_dir/v_neg -o run rtl/*.sv tb/tb_$bench.sv tb/mock_arbiter.sv \
+       -Mdir obj_dir/v_neg -o run rtl/*.sv tb/noc_tb_pkg.sv tb/tb_$bench.sv tb/mock_arbiter.sv \
        > /tmp/opencode/assert_neg.build 2>&1; then
     echo "ERROR   $name (build failed)"; tail -4 /tmp/opencode/assert_neg.build
     cp "$BAK.$(basename "$file")" "$file"; return
@@ -73,9 +76,10 @@ PY
 }
 
 echo "== 1. static parameter / elaboration checks =="
-# The fifo refuses a DEPTH that is not a power of two >= 2. Widening the
-# lower bound to 9 makes the default DEPTH = 8 illegal, so the check has to
-# fire before a single cycle is simulated.
+# The fifo refuses a DEPTH that is not a power of two >= 2. Raising the
+# lower bound to 9 makes every legal depth illegal -- 4 (the linnea_v2
+# default) and 8 alike -- so the check has to fire before a single cycle is
+# simulated, for whichever depth the bench is configured with.
 run_neg "fifo: DEPTH parameter check" rtl/fifo.sv \
   'assert ((DEPTH >= 2) && ((DEPTH & (DEPTH - 1)) == 0))' \
   'assert ((DEPTH >= 9) && ((DEPTH & (DEPTH - 1)) == 0))' \
@@ -98,6 +102,23 @@ run_neg "arbiter: stage-1 ignores the credit pool" rtl/arbiter.sv \
   "        if (sa_req[p][v] && (credit_count[o][sa_req_out_vc[p][v]] != '0)) mask[v] = 1'b1;" \
   "        if (sa_req[p][v]) mask[v] = 1'b1;" \
   arbiter 'arbiter:'
+
+# The VC-matched property itself (linnea_v2 section 4.5): a grant on input
+# VC gv must reserve output VC gv.
+#
+# This one is worth its own case precisely because it looks untestable. The
+# row stage builds its candidate mask from the row's own index k, so today
+# the two indices cannot disagree -- an assertion a reviewer could fairly
+# call tautological. Hand the row the NEXT output VC instead and the sideband
+# immediately reports a partner one slot along on every grant: the packet
+# would be reserved against the wrong downstream VC, and this is the only
+# place in the file that can see it, because everything downstream either
+# registers the signal once or derives from it. If the message never
+# appears here, the property really is only holding by accident.
+run_neg "arbiter: grant reserves a neighbouring output VC" rtl/arbiter.sv \
+  '          va_gnt_out_vc[row_pidx[o][k]][k] = VC_W'"'"'(k);' \
+  '          va_gnt_out_vc[row_pidx[o][k]][k] = VC_W'"'"'((k + 1) % NUM_VC);' \
+  arbiter 'reserved output vc'
 
 # The crossbar must drive an output with the data of the input it selected.
 run_neg "crossbar: data mux reads the port next to the winner" rtl/crossbar.sv \

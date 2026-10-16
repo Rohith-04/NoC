@@ -12,7 +12,7 @@
 // two decisions are made from different inputs -- the arbiter reads the
 // request/credit state, the crossbar reads only the post-VC-mux flit data
 // that each input port presents -- and keeping them apart is what lets the
-// arbiter be verified without modelling 32-bit payloads (section 5, seam 6
+// arbiter be verified without modelling full-width payloads (section 5, seam 6
 // of the spec).
 //
 // Both muxes are selected by the same `xbar_sel`, which comes out of SA
@@ -54,7 +54,11 @@
 //
 
 module crossbar #(
-    parameter int NUM_PORTS = 5  // fixed by the 5x5 crossbar
+    parameter int NUM_PORTS = 5, // fixed by the 5x5 crossbar
+    // Flit width. Everything the router reads from a flit is in the low 14
+    // bits, so this only widens the payload path -- no slice in this module
+    // depends on the absolute width.
+    parameter int FLIT_W    = 40
 ) (
     // ------------------------------------------------------------------
     // Clock and reset are not used by any datapath logic in here -- the
@@ -71,7 +75,7 @@ module crossbar #(
     // resolved its own VC mux (driven by `sa_pick`), so these are
     // post-selection -- the crossbar never has to look at a VC index.
     // ------------------------------------------------------------------
-    input  logic [NUM_PORTS-1:0][31:0] xbar_in_data,
+    input  logic [NUM_PORTS-1:0][FLIT_W-1:0] xbar_in_data,
     input  logic [NUM_PORTS-1:0][3:0]  xbar_in_route_next,
 
     // ------------------------------------------------------------------
@@ -86,7 +90,7 @@ module crossbar #(
     // Datapath out: one entry per output port, consumed by the matching
     // noc_output_port instance (which registers it onto the link).
     // ------------------------------------------------------------------
-    output logic [NUM_PORTS-1:0][31:0] xbar_out_data,
+    output logic [NUM_PORTS-1:0][FLIT_W-1:0] xbar_out_data,
     output logic [NUM_PORTS-1:0][3:0]  xbar_out_route_next
 );
 
@@ -103,7 +107,7 @@ module crossbar #(
   //===========================================================================
 
   always_comb begin : mux5
-    logic [31:0] d;   // scratch: the selected input port's datapath
+    logic [FLIT_W-1:0] d;   // scratch: the selected input port's datapath
     logic [3:0]  r;   // scratch: the same port's lookahead route
 
     // Default first, unconditionally, so that no path through the block can
@@ -161,7 +165,7 @@ module crossbar #(
       // "a grant of an all-zero payload" different things.
       assert property (@(posedge clk) disable iff (!rst_n)
                        !st_valid[o] |->
-                         ((xbar_out_data[o] == 32'b0) &&
+                         ((xbar_out_data[o] == FLIT_W'(0)) &&
                           (xbar_out_route_next[o] == 4'b0)))
         else $error("crossbar: idle output %0d drove data=%h route=%h",
                     o, xbar_out_data[o], xbar_out_route_next[o]);

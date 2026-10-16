@@ -6,7 +6,7 @@ process: the arbiter decides *who* switches, this decides *what they carry*.
 
 Splitting that decision into its own module is a verification boundary as
 much as an RTL one — it is what lets `rtl/arbiter.md` be verified without
-modelling 32-bit payloads (spec §5, seam 6).
+modelling full-width payloads (spec §5, seam 6).
 
 ---
 
@@ -17,6 +17,7 @@ modelling 32-bit payloads (spec §5, seam 6).
 | Name | Type | Default | Meaning |
 |---|---|---|---|
 | `NUM_PORTS` | `int` | 5 | Number of simultaneous inputs and outputs. Fixed at 5 for a single router (LOCAL, NORTH, EAST, WEST, SOUTH); the parameter exists so the port count is stated once, not so the block is reconfigurable. |
+| `FLIT_W` | `int` | 40 | Width of one flit, and therefore of the payload path. Everything the router reads from a flit is in the low 14 bits, so this only widens the muxed data — no slice in this module depends on the absolute width. |
 
 ### 1.2 Port declaration
 
@@ -28,15 +29,15 @@ Direction is from the DUT's point of view: `input` = driven by
 |---|---|---|---|---|
 | `clk` | 1 | input | clock generator → the three `assert property` blocks | **Not used by any datapath logic.** It exists only so the assertions at the bottom have an event to sample on, and so this module's port list has the same shape as every other router block. |
 | `rst_n` | 1 | input | reset generator → `disable iff` on the assertions | Synchronous, active low, matching `fifo.sv`. Also assertion-only here. |
-| `xbar_in_data` | `NUM_PORTS × 32` | input | each `noc_input_port`'s post-VC-mux datapath → the 5:1 payload mux | One flit per input port, already resolved by that port's own VC mux (driven by `sa_pick`). The crossbar never looks at a VC index. |
+| `xbar_in_data` | `NUM_PORTS × FLIT_W` (40) | input | each `noc_input_port`'s post-VC-mux datapath → the 5:1 payload mux | One flit per input port, already resolved by that port's own VC mux (driven by `sa_pick`). The crossbar never looks at a VC index. |
 | `xbar_in_route_next` | `NUM_PORTS × 4` | input | each `noc_input_port`'s captured lookahead → the 5:1 route mux | The 4-bit `route_next` travelling alongside each candidate flit, to be merged into the header by `noc_output_port`. |
 | `xbar_sel` | `NUM_PORTS × 3` | input | `arbiter` (SA stage 2 output, one-hot over `s1_valid`) → mux select and the tracking assertion | `xbar_sel[o]` is the **input port index** whose flit leaves through output `o`. 3 bits wide because it counts input ports `0..4`; only values `< NUM_PORTS` are reachable, and the guard in §2.2 keeps a larger value defined. |
 | `st_valid` | `NUM_PORTS` | input | `arbiter` → mux gating, `noc_output_port` (link register enable), the idle-output assertion | `st_valid[o]` says whether *any* flit leaves through output `o` this cycle. Also drives the arbiter's credit decrement, so it is the single "a flit is moving" indication for output `o`. |
-| `xbar_out_data` | `NUM_PORTS × 32` | output | `crossbar` → `noc_output_port` (registered onto the link) | Payload leaving through each output port, or `32'b0` when that output is idle. |
+| `xbar_out_data` | `NUM_PORTS × FLIT_W` (40) | output | `crossbar` → `noc_output_port` (registered onto the link) | Payload leaving through each output port, or `FLIT_W'(0)` when that output is idle. |
 | `xbar_out_route_next` | `NUM_PORTS × 4` | output | `crossbar` → `noc_output_port`'s header merge | Lookahead route for each output, or `4'b0` when idle. Merged into bits `[13:10]` of a HEAD only. |
 
 The two output arrays are deliberately **not** packed into one field: they
-have different widths (32 and 4) and different consumers (link register vs.
+have different widths (`FLIT_W` and 4) and different consumers (link register vs.
 header merge), and a single packed value would have to be sliced apart again
 at every use.
 
@@ -44,7 +45,7 @@ at every use.
 
 | Name | Width | Kind | Reset | Working / description |
 |---|---|---|---|---|
-| `d` | 32 | `logic` (block-local scratch) | n/a | Selected input port's payload, assigned on **both** arms of the guard so no path can infer a latch. |
+| `d` | `FLIT_W` (40) | `logic` (block-local scratch) | n/a | Selected input port's payload, assigned on **both** arms of the guard so no path can infer a latch. |
 | `r` | 4 | `logic` (block-local scratch) | n/a | Same port's lookahead route, same discipline. |
 
 That is the entire state. There is no flop, no memory, no register, and no
@@ -55,7 +56,7 @@ list uniformity only.
 
 ## 2. RTL explanation
 
-### 2.1 One `always_comb`, not two (lines 105–129)
+### 2.1 One `always_comb`, not two (lines 109–133)
 
 Both muxes live in a single `mux5` block. They are two views of one
 selection, so gating them in one place is the only way they cannot drift
@@ -101,7 +102,7 @@ the range check: `xbar_sel` is 3 bits and can represent 0..7, but only
 0..4 index a real entry. The guard keeps simulation defined; the assertion
 below says the guard should never have to fire.
 
-### 2.3 Assertions — this module's half of seam 6 (lines 143–184)
+### 2.3 Assertions — this module's half of seam 6 (lines 147–188)
 
 The arbiter promises that `xbar_sel` names an input port SA stage 1 already
 picked. That promise has to be checked *here*, where it is consumed — a
@@ -182,23 +183,25 @@ winner"* rebuilds the bench with `--assert` **on** and mutates the payload
 mux to select `(xbar_sel[o] + 1) % NUM_PORTS`:
 
 ```
-%Error: crossbar.sv:180: Assertion failed ... crossbar: output 0 does not track its selection (0)
-%Error: rtl/crossbar.sv:180: Verilog $stop
+%Error: crossbar.sv:184: Assertion failed ... crossbar: output 0 does not track its selection (0)
+%Error: rtl/crossbar.sv:184: Verilog $stop
 ```
 
 That is the proof the assertion side works: with `--assert` the property
 fires and the run aborts at the first violation. The same mutation run
 *without* `--assert` (as `tools/mutate_all.sh` does) is caught instead by
-the bench — **31/107 CHECKS FAILED** — which is why both suites exist: one
+the bench — **30/103 CHECKS FAILED** — which is why both suites exist: one
 proves the benches, the other proves the assertions.
 
 ### 3.5 Mutation sanity
 
 `tools/mutate_all.sh` targets this file once — *"crossbar: data mux reads the
 port next to the winner"*, which selects `(xbar_sel[o] + 1) % NUM_PORTS`
-instead of `xbar_sel[o]`. It is killed by `tb_router_top` at **31/107 CHECKS
+instead of `xbar_sel[o]`. It is killed by `tb_router_top` at **30/103 CHECKS
 FAILED**, the largest kill count in the suite: every routed packet takes the
-wrong payload, so essentially the whole run fails.
+wrong payload, so essentially the whole run fails. (103 rather than the clean
+bench's 104 because one of its checks sits behind an `rx_n()` guard and is
+never reached — see `tb_router_top.md` §3.4 for why the denominators vary.)
 
 The header merge and link register that consume these outputs are covered by
 the two mutations in `tools/mutate_out.sh`, documented in

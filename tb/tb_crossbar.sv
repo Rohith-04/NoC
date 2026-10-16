@@ -36,9 +36,14 @@
 
 module tb_crossbar;
 
+  // Flit field model and the shared reporter (see noc_tb_pkg.sv).
+  import noc_tb_pkg::*;
+
   //---------------------------------------------------------------
   // 1. Parameters
   //---------------------------------------------------------------
+  // FLIT_W is owned by noc_tb_pkg.
+
   localparam int       NUM_PORTS   = 5;
   localparam realtime  CLK_PERIOD  = 10ns;
 
@@ -54,19 +59,17 @@ module tb_crossbar;
   logic                     clk;
   logic                     rst_n;
 
-  logic [NUM_PORTS-1:0][31:0] xbar_in_data;
+  logic [NUM_PORTS-1:0][FLIT_W-1:0] xbar_in_data;
   logic [NUM_PORTS-1:0][3:0]  xbar_in_route_next;
   logic [NUM_PORTS-1:0][2:0]  xbar_sel;
   logic [NUM_PORTS-1:0]       st_valid;
 
-  logic [NUM_PORTS-1:0][31:0] xbar_out_data;
+  logic [NUM_PORTS-1:0][FLIT_W-1:0] xbar_out_data;
   logic [NUM_PORTS-1:0][3:0]  xbar_out_route_next;
 
   //---------------------------------------------------------------
-  // 3. Bookkeeping
+  // 3. Bookkeeping -- checks, errors and check() come from noc_tb_pkg
   //---------------------------------------------------------------
-  int checks  = 0;
-  int errors  = 0;
 
   //---------------------------------------------------------------
   // 4. Clock
@@ -92,16 +95,9 @@ module tb_crossbar;
 
   //---------------------------------------------------------------
   // 6. Helpers
+  //
+  // check() comes from noc_tb_pkg.
   //---------------------------------------------------------------
-  task automatic check(input string what, input logic [31:0] actual,
-                       input logic [31:0] expected);
-    checks++;
-    if (actual === expected) $display("[PASS] %-58s %h", what, actual);
-    else begin
-      $display("[FAIL] %-58s got %h exp %h", what, actual, expected);
-      errors++;
-    end
-  endtask
 
   // Advance to just after a negedge so stimulus lands a half-period clear
   // of the posedge the DUT's assertions sample on.
@@ -124,18 +120,22 @@ module tb_crossbar;
 
   // A payload that is different in every region of the word, so a selection
   // that picks the wrong input port cannot accidentally match: the type
-  // bits, the route field, both destination fields and the top byte all
-  // carry the port index.
-  function automatic logic [31:0] pat(input int p);
-    logic [31:0] v;
-    v         = '0;
-    v[31:24]  = 8'(p + 1);     // per-port signature
-    v[21:14]  = 8'(7 * p + 3); // unrelated function of p, breaks runs
-    v[13:10]  = 4'(p);         // the header's ROUTE field -- carried through
-    v[9:7]    = 3'(p);         // DEST_Y
-    v[6:4]    = 3'((p + 1) % 8);  // DEST_X
-    v[3:2]    = 2'(p % 4);     // VC_ID (ignored by routers, D3)
-    v[1:0]    = 2'b11;         // HEAD_TAIL
+  // bits, the route field, both destination fields and the ID all carry the
+  // port index.
+  //
+  // Built through noc_tb_pkg's setters rather than by slice. It used to
+  // stamp `8'(p + 1)` into [31:24] as a second signature as well; that slot
+  // straddles BURST and LEN and is not a field in its own right, and with
+  // four named regions already carrying p there is nothing left for a wrong
+  // pick to hide behind -- so the pattern stays honest and stays named.
+  function automatic logic [FLIT_W-1:0] pat(input int p);
+    logic [FLIT_W-1:0] v;
+    v = '0;
+    v = with_id   (v, 8'(7 * p + 3));       // unrelated function of p, breaks runs
+    v = with_route(v, 4'(p));               // ROUTE -- carried through untouched
+    v = with_dst  (v, 3'(p), 3'((p + 1) % 8));
+    v = with_kind (v, 2'(p % 4));           // KIND (ignored by routers, D3)
+    v = with_type (v, FLIT_HEAD_TAIL);
     return v;
   endfunction
 

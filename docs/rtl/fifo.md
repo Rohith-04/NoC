@@ -15,8 +15,8 @@ simply a free slot here.
 
 | Name | Type | Default | Constraint | Meaning |
 |---|---|---|---|---|
-| `WIDTH` | `int` | 32 | `WIDTH > 0` | Width of one stored element. The NoC stores whole flits, so this is 32. |
-| `DEPTH` | `int` | 8 | power of two, `>= 2` | Number of elements. The wrap-bit pointer scheme needs a power of two so the index is just the low `ADDRWIDTH` bits. |
+| `WIDTH` | `int` | 40 | `WIDTH > 0` | Width of one stored element. The NoC stores whole flits, so this is 40 — the design's `FLIT_W`. The FIFO itself is width-agnostic and never looks inside the word. |
+| `DEPTH` | `int` | 4 | power of two, `>= 2` | Number of elements. The wrap-bit pointer scheme needs a power of two so the index is just the low `ADDRWIDTH` bits. |
 
 Derived: `ADDRWIDTH = $clog2(DEPTH)` — the pointer is `ADDRWIDTH+1` bits
 wide; the extra bit is the wrap bit.
@@ -36,7 +36,7 @@ Both constraints are enforced by immediate assertions in an `initial` block
 | `data_out` | `WIDTH` | output | FIFO → consumer | Registered. Holds the element popped on the most recent read edge; the bypass path writes it too, so it is never a stale value after a read. |
 | `empty` | 1 | output | FIFO → producer / arbiter | `w_ptr == r_ptr`. Combinational, so a producer can decide in the same cycle whether there is room. |
 | `full` | 1 | output | FIFO → producer / credit logic | Wrap bits differ **and** index bits equal: the queue has wrapped completely onto itself. Combinational. |
-| `err` | 1 | output | FIFO → testbench / protocol checker | `(wr_enable && full) || (rd_enable && empty && !wr_enable)`. A purely observational flag — nothing in the design consumes it at runtime, it exists so that a bookkeeping bug is reported rather than silently corrupting the queue. |
+| `err` | 1 | output | FIFO → testbench / protocol checker | `(wr_enable && full) \|\| (rd_enable && empty && !wr_enable)`. A purely observational flag — nothing in the design consumes it at runtime, it exists so that a bookkeeping bug is reported rather than silently corrupting the queue. |
 
 There is no read-data "valid" output: the consumer knows a pop happened
 because it asserted `rd_enable` and `!empty`.
@@ -57,7 +57,7 @@ pointers and the enables — they are **not** registers and hold no state.
 
 ## 2. RTL explanation
 
-### 2.1 Parameter checks (lines 57–63)
+### 2.1 Parameter checks (lines 62–68)
 
 ```systemverilog
 initial begin
@@ -75,9 +75,9 @@ with `DEPTH == 1`, `ADDRWIDTH` would be 0 and that slice would be empty.
 
 This is the one assertion family in the design that is *not* clocking SVA;
 `tools/assert_neg.sh` case 1 exercises it by widening the bound to 9 so the
-default `DEPTH = 8` becomes illegal.
+default `DEPTH = 4` becomes illegal.
 
-### 2.2 Pointers and status (lines 65–92)
+### 2.2 Pointers and status (lines 70–97)
 
 The pointers are one bit wider than the address. Comparing the wrap bits
 gives the classic two-case status:
@@ -91,7 +91,7 @@ automatically: the low `ADDRWIDTH` bits of `w_ptr + 1` are the next slot. No
 separate wrap compare is needed, which is the entire reason for the
 parameter constraint in §2.1.
 
-### 2.3 Protocol error (line 101)
+### 2.3 Protocol error (line 106)
 
 ```systemverilog
 assign err = (wr_enable && full) || (rd_enable && empty && !wr_enable);
@@ -102,7 +102,7 @@ read and write together while empty — is *not* an error, it is the bypass
 (§2.4), hence the `&& !wr_enable` term. Keeping `err` purely combinational
 means it names the offending cycle exactly rather than one cycle later.
 
-### 2.4 The sequential block (lines 107–173)
+### 2.4 The sequential block (lines 112–178)
 
 The block has three mutually exclusive cases, checked in this order:
 
@@ -149,10 +149,10 @@ adds a credit counter here.
 
 ## 3. Testing explanation
 
-**Bench:** `tb/tb_fifo.sv`, top module `tb_fifo` (953 checks).
-**Run:** `make TOP=fifo sim` — reports `Checks : 953 / Errors : 0`.
+**Bench:** `tb/tb_fifo.sv`, top module `tb_fifo` (879 checks).
+**Run:** `make TOP=fifo sim` — reports `Checks : 879 / Errors : 0`.
 
-### 3.1 Why 953 checks and not a handful
+### 3.1 Why 879 checks and not a handful
 
 A FIFO's correct behaviour is a function of *(occupancy, wr, rd)*. The bench
 exercises that space systematically rather than sampling it:
@@ -190,11 +190,12 @@ preserve.
 ### 3.3 Assertion coverage
 
 The parameter assertions in §2.1 are the only SVA in this file, and they are
-proven to fire by `tools/assert_neg.sh`, which rebuilds the FIFO with the
-`DEPTH >= 2` bound widened to 9 and requires:
+proven to fire by `tools/assert_neg.sh` case *"fifo: DEPTH parameter check"*,
+which rebuilds the FIFO with the `DEPTH >= 2` bound widened to 9 — with that
+bound the default `DEPTH = 4` is itself illegal — and requires:
 
 ```
-%Fatal: fifo.sv:62: Assertion failed ... fifo: DEPTH must be a power of two >= 2, got 8
+%Fatal: fifo.sv:67: Assertion failed ... fifo: DEPTH must be a power of two >= 2, got 4
 ```
 
 The build for that case runs with `--assert`, which is mandatory in this

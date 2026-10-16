@@ -25,7 +25,7 @@
 //    on the output link in c3". A grant with no flit the next cycle, or a
 //    flit with no grant, are both protocol violations at the link.
 //
-// 3. D3 -- the VC_ID field [3:2] is never rewritten. The authoritative VC is
+// 3. D3 -- the KIND field [3:2] is never rewritten. The authoritative VC is
 //    the `vc_id` sideband; rewriting the in-flit field would look fine in a
 //    single-router test and corrupt every packet in a chain.
 //
@@ -33,9 +33,11 @@
 // Reference model
 // ---------------
 // The expected merge is recomputed here from first principles rather than
-// read out of the DUT:
+// read out of the DUT, in the same vocabulary the package states it in
+// (noc_tb_pkg.ref_merge):
 //
-//     expected = data;  if (data[0]) expected[13:10] = route_next;
+//     expected = data;
+//     if (flit_is_head(data)) expected = with_route(data, route_next);
 //
 // so a bug in the DUT's merge condition cannot be mirrored by an identical
 // bug in the checker.
@@ -52,15 +54,24 @@
 
 module tb_noc_output_port;
 
+  // Flit field model and the shared reporter (see noc_tb_pkg.sv).
+  import noc_tb_pkg::*;
+
   //---------------------------------------------------------------
   // 1. Parameters
   //---------------------------------------------------------------
   localparam realtime CLK_PERIOD = 10ns;
 
-  localparam logic [1:0] FLIT_BODY      = 2'b00;
-  localparam logic [1:0] FLIT_HEAD      = 2'b01;
-  localparam logic [1:0] FLIT_TAIL      = 2'b10;
-  localparam logic [1:0] FLIT_HEAD_TAIL = 2'b11;
+  // FLIT_W is owned by noc_tb_pkg; it is still passed to the DUT below so
+  // the instance and the bench-side signals are provably the same number.
+  // Only used to size the vc_id sideband this module forwards.
+  parameter int NUM_VC = 4;
+  // VC index width (linnea_v2 section 1): derived rather than independent,
+  // so the sideband can never be narrower than the index it carries.
+  localparam int VC_W   = (NUM_VC > 1) ? $clog2(NUM_VC) : 1;
+
+  // FLIT_BODY / FLIT_HEAD / FLIT_TAIL / FLIT_HEAD_TAIL and ROUTE_MASK come
+  // from the package.
 
   localparam logic [3:0] DIR_LOCAL = 4'b0000;
   localparam logic [3:0] DIR_NORTH = 4'b0001;
@@ -72,8 +83,8 @@ module tb_noc_output_port;
   // without repeating the literals (section 2).
   localparam logic [3:0] DIR [5] = '{DIR_LOCAL, DIR_NORTH, DIR_EAST, DIR_WEST, DIR_SOUTH};
 
-  // Only [13:10] is allowed to change across the merge.
-  localparam logic [31:0] ROUTE_MASK = 32'h0000_3C00;
+  // Only [13:10] is allowed to change across the merge -- ROUTE_MASK,
+  // which names that field, comes from the package.
 
   //---------------------------------------------------------------
   // 2. DUT I/O signals -- plain scalars throughout
@@ -81,20 +92,18 @@ module tb_noc_output_port;
   logic        clk;
   logic        rst_n;
 
-  logic [31:0] xbar_out_data;
+  logic [FLIT_W-1:0] xbar_out_data;
   logic [3:0]  xbar_out_route_next;
   logic        st_valid;
-  logic [1:0]  st_out_vc;
+  logic [VC_W-1:0]  st_out_vc;
 
-  logic [31:0] flit_data;
+  logic [FLIT_W-1:0] flit_data;
   logic        flit_valid;
-  logic [1:0]  vc_id;
+  logic [VC_W-1:0]  vc_id;
 
   //---------------------------------------------------------------
-  // 3. Bookkeeping
+  // 3. Bookkeeping -- checks, errors and check() come from noc_tb_pkg
   //---------------------------------------------------------------
-  int checks = 0;
-  int errors = 0;
 
   //---------------------------------------------------------------
   // 4. Clock
@@ -105,7 +114,14 @@ module tb_noc_output_port;
   //---------------------------------------------------------------
   // 5. DUT
   //---------------------------------------------------------------
-  noc_output_port dut (
+  noc_output_port #(
+      // Both must come from the bench, not stay at the module's defaults:
+      // this block derives VC_W from NUM_VC to size its own st_out_vc/vc_id
+      // sideband, so leaving it at the default makes the link-side signals
+      // the bench drives a different width the moment the sweep moves.
+      .FLIT_W(FLIT_W),
+      .NUM_VC(NUM_VC)
+  ) dut (
       .clk                (clk),
       .rst_n              (rst_n),
       .xbar_out_data      (xbar_out_data),
@@ -119,16 +135,11 @@ module tb_noc_output_port;
 
   //---------------------------------------------------------------
   // 6. Helpers
+  //
+  // check() and ref_merge() come from noc_tb_pkg. ref_merge is deliberately
+  // expressed there as "a head's route becomes the lookahead, everything
+  // else survives" -- the spec's wording, not this DUT's code.
   //---------------------------------------------------------------
-  task automatic check(input string what, input logic [31:0] actual,
-                       input logic [31:0] expected);
-    checks++;
-    if (actual === expected) $display("[PASS] %-58s %h", what, actual);
-    else begin
-      $display("[FAIL] %-58s got %h exp %h", what, actual, expected);
-      errors++;
-    end
-  endtask
 
   task automatic reset_dut();
     xbar_out_data       = '0;
@@ -142,27 +153,13 @@ module tb_noc_output_port;
     #1;
   endtask
 
-  // Independent reference for the merge. Written from the spec's wording,
-  // not from the DUT's code.
-  function automatic logic [31:0] ref_merge(input logic [31:0] d, input logic [3:0] r);
-    logic [31:0] m;
-    m = d;
-    if (d[0]) m[13:10] = r;  // is_head == type[0]
-    return m;
-  endfunction
-
-  // Build a flit whose type, VC field, route field and payload are all
+  // Build a flit whose type, KIND, route field and payload are all
   // independently controllable, so a merge that touches the wrong field is
-  // visible.
-  function automatic logic [31:0] make_flit(input logic [1:0] typ, input logic [1:0] vc,
+  // visible. A thin wrapper over the package's mk_hdr: the field map lives
+  // there, this only fixes the argument order the tests here already use.
+  function automatic logic [FLIT_W-1:0] make_flit(input logic [1:0] typ, input logic [1:0] kind,
                                             input logic [3:0] route_field, input int tag);
-    logic [31:0] f;
-    f         = '0;
-    f[1:0]    = typ;
-    f[3:2]    = vc;
-    f[13:10]  = route_field;
-    f[31:14]  = 18'((tag * 37) + 1);  // payload / header upper bits
-    return f;
+    return mk_hdr(typ, kind, route_field, 3'd0, 3'd0, TAG_W'((tag * 37) + 1));
   endfunction
 
   // Drive one cycle: apply stimulus just after a negedge, check the
@@ -173,9 +170,9 @@ module tb_noc_output_port;
   // register have to agree, and a bench that checked only one of them would
   // pass happily on a DUT where the register captured a different word than
   // the one the merge produced.
-  task automatic cycle(input string tag, input logic [31:0] d, input logic [3:0] r,
-                       input logic v, input logic [1:0] svc);
-    logic [31:0] exp_m;
+  task automatic cycle(input string tag, input logic [FLIT_W-1:0] d, input logic [3:0] r,
+                       input logic v, input logic [VC_W-1:0] svc);
+    logic [FLIT_W-1:0] exp_m;
 
     @(negedge clk);
     xbar_out_data       = d;
@@ -235,7 +232,7 @@ module tb_noc_output_port;
       endcase
       tag = i + 1;
       cycle($sformatf("T2 type %02b", typ),
-            make_flit(typ, 2'b10, stale, tag), look, 1'b1, 2'b11);
+            make_flit(typ, KIND_WR_RESP, stale, tag), look, 1'b1, VC_W'(3 % NUM_VC));
     end
   endtask
 
@@ -244,26 +241,26 @@ module tb_noc_output_port;
   // other field is non-zero -- an all-zero payload would make this test
   // pass no matter what the merge did to it.
   task automatic t3_only_route_field_changes();
-    logic [31:0] d;
-    logic [31:0] got;
+    logic [FLIT_W-1:0] d;
+    logic [FLIT_W-1:0] got;
     logic [3:0]  look;
 
     // A HEAD: [13:10] changes, everything else must not.
     look = DIR_NORTH;
-    d    = make_flit(FLIT_HEAD, 2'b01, DIR_SOUTH, 7);
-    cycle("T3 HEAD", d, look, 1'b1, 2'b01);
+    d    = make_flit(FLIT_HEAD, KIND_RD_REQ, DIR_SOUTH, 7);
+    cycle("T3 HEAD", d, look, 1'b1, VC_W'(1 % NUM_VC));
     got = dut.merged;
     check("T3 HEAD: bits above the route field untouched", got & ~ROUTE_MASK, d & ~ROUTE_MASK);
-    check("T3 HEAD: VC field [3:2] untouched (D3)", {30'b0, got[3:2]}, {30'b0, d[3:2]});
-    check("T3 HEAD: type field [1:0] untouched", {30'b0, got[1:0]}, {30'b0, d[1:0]});
-    check("T3 HEAD: route field replaced", {28'b0, got[13:10]}, {28'b0, look});
+    check("T3 HEAD: KIND untouched (D3)", flit_kind(got), flit_kind(d));
+    check("T3 HEAD: type field untouched", flit_type(got), flit_type(d));
+    check("T3 HEAD: route field replaced", flit_route(got), look);
 
     // A TAIL: nothing may change at all.
-    d = make_flit(FLIT_TAIL, 2'b11, DIR_WEST, 9);
-    cycle("T3 TAIL", d, look, 1'b1, 2'b10);
+    d = make_flit(FLIT_TAIL, KIND_RD_RESP, DIR_WEST, 9);
+    cycle("T3 TAIL", d, look, 1'b1, VC_W'(2 % NUM_VC));
     got = dut.merged;
     check("T3 TAIL: whole word identical to the input", got, d);
-    check("T3 TAIL: route field still payload", {28'b0, got[13:10]}, {28'b0, d[13:10]});
+    check("T3 TAIL: route field still payload", flit_route(got), flit_route(d));
   endtask
 
   // T4: idle cycles. st_valid low must leave flit_valid low the next cycle
@@ -271,12 +268,12 @@ module tb_noc_output_port;
   // zero when idle, and the register re-zeroes it here, so two independent
   // things have to agree for the wire to be quiet.
   task automatic t4_idle();
-    cycle("T4 active", make_flit(FLIT_HEAD_TAIL, 2'b00, DIR_WEST, 11), DIR_LOCAL, 1'b1, 2'b10);
+    cycle("T4 active", make_flit(FLIT_HEAD_TAIL, KIND_WR_REQ, DIR_WEST, 11), DIR_LOCAL, 1'b1, VC_W'(2 % NUM_VC));
     check("T4 flit_present after the active cycle", {31'b0, flit_valid}, 32'h1);
 
     // Idle, but with a non-zero payload still sitting on the crossbar --
     // the case where a stale value could survive.
-    cycle("T4 idle with stale data", 32'hDEAD_BEEF, 4'b1111, 1'b0, 2'b11);
+    cycle("T4 idle with stale data", 32'hDEAD_BEEF, 4'b1111, 1'b0, VC_W'(3 % NUM_VC));
     check("T4 flit_valid low after idle", {31'b0, flit_valid}, 32'h0);
     check("T4 flit_data zero after idle", flit_data, 32'h0);
     check("T4 vc_id zero after idle", {30'b0, vc_id}, 32'h0);
@@ -288,10 +285,10 @@ module tb_noc_output_port;
   // beat carries a different payload, so a held word is caught directly
   // rather than inferred.
   task automatic t5_back_to_back();
-    logic [31:0] d;
-    logic [31:0] exp_prev;
+    logic [FLIT_W-1:0] d;
+    logic [FLIT_W-1:0] exp_prev;
     logic [3:0]  look;
-    logic [1:0]  svc;
+    logic [VC_W-1:0]  svc;
     bit          have_prev;
 
     exp_prev  = '0;
@@ -304,7 +301,7 @@ module tb_noc_output_port;
       if (i % 2 == 0) d = make_flit(FLIT_HEAD, 2'(i % 4), DIR_SOUTH, i + 20);
       else d = make_flit(FLIT_BODY, 2'(i % 4), 4'((i * 3) % 16), i + 20);
       look = DIR[(i + 1) % 5];
-      svc  = 2'(i % 4);
+      svc  = VC_W'(i % NUM_VC);
       cycle($sformatf("T5 beat %0d", i), d, look, 1'b1, svc);
 
       // The payload changes every beat, so the register must change with
@@ -317,26 +314,27 @@ module tb_noc_output_port;
     end
   endtask
 
-  // T6: D3 in isolation. The in-flit VC field and the vc_id sideband are
-  // allowed to DISAGREE -- that is the whole point of assumption D3 -- and
-  // the merge must leave the in-flit copy alone while the sideband carries
-  // the authoritative value.
-  task automatic t6_vc_field_never_rewritten();
-    logic [31:0] d;
+  // T6: D3 in isolation. The header's KIND slot and the vc_id sideband are
+  // two unrelated fields: KIND is written once by the source NI and read by
+  // no router, vc_id is the authoritative VC for the link. The merge must
+  // leave the in-flit copy alone while the sideband carries its own value --
+  // and it must not confuse one for the other.
+  task automatic t6_kind_field_never_rewritten();
+    logic [FLIT_W-1:0] d;
 
-    // Flit claims VC 3 in its header, sideband says VC 0.
-    d = make_flit(FLIT_HEAD, 2'b11, DIR_SOUTH, 31);
-    cycle("T6 head with a disagreeing VC field", d, DIR_WEST, 1'b1, 2'b00);
-    check("T6 in-flit VC field [3:2] kept its own value",
-          {30'b0, dut.merged[3:2]}, 32'h3);
-    check("T6 sideband carries the authoritative VC", {30'b0, vc_id}, 32'h0);
-    check("T6 the two are allowed to differ", {30'b0, dut.merged[3:2]} == {30'b0, vc_id},
-          32'h0);
+    // Flit carries KIND RD_RESP in its header, sideband says VC 0.
+    d = make_flit(FLIT_HEAD, KIND_RD_RESP, DIR_SOUTH, 31);
+    cycle("T6 head with a KIND the sideband does not share", d, DIR_WEST, 1'b1, VC_W'(0 % NUM_VC));
+    check("T6 in-flit KIND kept its own value", flit_kind(dut.merged), KIND_RD_RESP);
+    check("T6 sideband carries the authoritative VC", vc_id, VC_W'(0));
+    // The flit's KIND must NOT have been overwritten with the sideband VC --
+    // the failure a merge that confused the two fields would produce.
+    check("T6 KIND did not become the sideband VC", flit_kind(dut.merged) == vc_id, 1'b0);
 
-    // And a non-head, where [3:2] is payload rather than a VC field at all.
-    d = make_flit(FLIT_TAIL, 2'b10, 4'h5, 33);
-    cycle("T6 tail whose payload overlaps the VC field", d, DIR_EAST, 1'b1, 2'b01);
-    check("T6 tail payload [3:2] preserved", {30'b0, dut.merged[3:2]}, {30'b0, d[3:2]});
+    // And a non-head, where that slot is payload rather than a header field.
+    d = make_flit(FLIT_TAIL, KIND_WR_RESP, 4'h5, 33);
+    cycle("T6 tail whose payload overlaps the KIND slot", d, DIR_EAST, 1'b1, VC_W'(1 % NUM_VC));
+    check("T6 tail payload in the KIND slot preserved", flit_kind(dut.merged), flit_kind(d));
   endtask
 
   // T7: a grant must be followed by a flit, and no flit without a grant.
@@ -348,12 +346,15 @@ module tb_noc_output_port;
   // compared against a stale expectation here.
   task automatic t7_valid_pairs();
     logic     v;
-    logic [1:0] svc;
+    logic [VC_W-1:0] svc;
 
     for (int i = 0; i < 10; i++) begin : t7_beat
       v   = (i % 3) != 1;  // deliberately interleaves idle cycles
-      svc = 2'((i + 1) % 4);
-      cycle($sformatf("T7 beat %0d", i), make_flit(FLIT_HEAD, svc, DIR_EAST, 40 + i),
+      svc = VC_W'((i + 1) % NUM_VC);
+      // The header field is two bits whatever NUM_VC is -- this test does
+      // not care what is in it, only that the sideband tracks the grant --
+      // so the wider VC index is cut down rather than narrowing the flit.
+      cycle($sformatf("T7 beat %0d", i), make_flit(FLIT_HEAD, KIND_WR_REQ, DIR_EAST, 40 + i),
             DIR_NORTH, v, svc);
 
       if (!v) check($sformatf("T7 beat %0d: sideband does not leak into an idle cycle", i),
@@ -387,8 +388,8 @@ module tb_noc_output_port;
     $display("---- T5  back-to-back, one flit per cycle ----");
     t5_back_to_back();
 
-    $display("---- T6  D3: the in-flit VC field is never rewritten ----");
-    t6_vc_field_never_rewritten();
+    $display("---- T6  D3: the in-flit KIND field is never rewritten ----");
+    t6_kind_field_never_rewritten();
 
     $display("---- T7  flit_valid and vc_id paired with their grant ----");
     t7_valid_pairs();

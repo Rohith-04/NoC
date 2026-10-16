@@ -30,10 +30,11 @@
 // encoding and the merge silently starts rewriting payload. It is checked
 // directly by the assertions below rather than left to be noticed later.
 //
-// Only [13:10] is written. [3:2] is the VC_ID field and is deliberately
-// ignored (assumption D3): it goes stale after the first hop, the
-// authoritative VC is the `vc_id` sideband, and rewriting it here would
-// look correct in a single-router test and corrupt every packet in a chain.
+// Only [13:10] is written. [3:2] is the KIND field (it was VC_ID when D3 was
+// written) and is deliberately ignored: the sideband `vc_id` is the
+// authoritative VC, KIND is set once by the source NI and has nothing to do
+// with the hop being taken, and rewriting it here would look correct in a
+// single-router test and corrupt every packet in a chain.
 //
 //
 // Why the merge is here and not in the crossbar
@@ -59,7 +60,15 @@
 //   arbiter, drives the downstream router's (or the NI's) input port.
 //
 
-module noc_output_port (
+module noc_output_port #(
+    // Flit width. The header merge writes only [13:10], so the width shows
+    // up here purely as the payload path -- but the "nothing outside
+    // [13:10] moved" assertion below is expressed in terms of this, because
+    // a 32-bit mask silently stops covering the upper bits once the word
+    // grows past 32.
+    parameter int FLIT_W = 40,
+    parameter int NUM_VC = 4   // only used to size the VC sideband below
+) (
     input logic clk,
     input logic rst_n,  // synchronous, active low -- matches fifo.sv
 
@@ -69,7 +78,7 @@ module noc_output_port (
     // applied unconditionally and the register gates it with `st_valid`, so
     // the two cases cannot differ.
     // ------------------------------------------------------------------
-    input  logic [31:0] xbar_out_data,
+    input  logic [FLIT_W-1:0] xbar_out_data,
     input  logic [3:0]  xbar_out_route_next,
 
     // ------------------------------------------------------------------
@@ -78,16 +87,22 @@ module noc_output_port (
     // the next router's input port demuxes its FIFOs with).
     // ------------------------------------------------------------------
     input  logic        st_valid,
-    input  logic [1:0]  st_out_vc,
+    input  logic [VC_W-1:0]  st_out_vc,
 
     // ------------------------------------------------------------------
     // The link itself, registered. One cycle of the credit loop lives in
     // this module (section 6); see the header comment.
     // ------------------------------------------------------------------
-    output logic [31:0] flit_data,
+    output logic [FLIT_W-1:0] flit_data,
     output logic        flit_valid,
-    output logic [1:0]  vc_id
+    output logic [VC_W-1:0]  vc_id
 );
+
+  // VC index width (section 1 of linnea_v2): enough bits to name any of
+  // NUM_VC virtual channels. Derived here rather than passed in, so a
+  // -GNUM_VC sweep cannot leave the sideband narrower than the index it
+  // carries.
+  localparam int VC_W = (NUM_VC > 1) ? $clog2(NUM_VC) : 1;
 
 
   //===========================================================================
@@ -99,7 +114,13 @@ module noc_output_port (
   // would silently drop any type that is added later.
   //===========================================================================
 
-  logic [31:0] merged;
+  logic [FLIT_W-1:0] merged;
+
+  // One-hot mask for the ROUTE field, [13:10]. Sized to the flit so that
+  // `~ROUTE_BITS` covers every bit *except* the route for whatever FLIT_W
+  // is -- a 32-bit literal would be zero-extended into a 40-bit compare and
+  // quietly stop checking the upper eight bits.
+  localparam logic [FLIT_W-1:0] ROUTE_BITS = 'h3C00;
 
   always_comb begin : header_merge
     // Default: the payload exactly as it arrived from the crossbar. Any
@@ -115,7 +136,7 @@ module noc_output_port (
     // type[0]"), and having one spelling here means an encoding change has
     // exactly one place to break and one assertion to trip.
     if (xbar_out_data[0]) begin
-      // Only the route field. [3:2] (VC_ID) and [1:0] (type) are left
+      // Only the route field. [3:2] (KIND, set by the source NI) and [1:0] (type) are left
       // alone -- see assumption D3 in the header comment.
       merged[13:10] = xbar_out_route_next;
     end
@@ -136,16 +157,16 @@ module noc_output_port (
 
   always_ff @(posedge clk) begin : link_reg
     if (!rst_n) begin
-      flit_data  <= 32'b0;
+      flit_data  <= '0;
       flit_valid <= 1'b0;
-      vc_id      <= 2'b0;
+      vc_id      <= '0;
     end else begin
       // Gating the payload with st_valid costs nothing (the crossbar
       // already drives zero when idle) and guarantees the data and the
       // valid bit cannot disagree about whether a flit was presented.
-      flit_data  <= st_valid ? merged : 32'b0;
+      flit_data  <= st_valid ? merged : '0;
       flit_valid <= st_valid;
-      vc_id      <= st_valid ? st_out_vc : 2'b0;
+      vc_id      <= st_valid ? st_out_vc : '0;
     end
   end
 
@@ -190,18 +211,18 @@ module noc_output_port (
                      (merged[13:10] == xbar_out_data[13:10]))
     else $error("noc_output_port: non-HEAD payload [13:10] was overwritten");
 
-  // -- The VC field is never touched (assumption D3) -----------------------
+  // -- The KIND field is never touched (D3, renamed from VC_ID) -----------------------
   // Ungated by st_valid: the splice must not depend on whether a flit is
   // actually present, and this is the cheapest way to say so.
   assert property (@(posedge clk) disable iff (!rst_n)
                    merged[3:2] == xbar_out_data[3:2])
-    else $error("noc_output_port: VC_ID field [3:2] was modified by the merge");
+    else $error("noc_output_port: KIND field [3:2] was modified by the merge");
 
   // -- Everything outside [13:10] survives the merge -----------------------
   // The complement of the two checks above, stated once for the whole word
   // so that a future edit to some other field is caught here too.
   assert property (@(posedge clk) disable iff (!rst_n)
-                   (merged & ~32'h00003C00) == (xbar_out_data & ~32'h00003C00))
+                   (merged & ~ROUTE_BITS) == (xbar_out_data & ~ROUTE_BITS))
     else $error("noc_output_port: merge modified bits outside [13:10]");
 
   // -- The register is exactly one cycle behind the grant ------------------

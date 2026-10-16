@@ -34,8 +34,13 @@
 //------------------------------------------------------------------------------
 
 module fifo #(
-    parameter int WIDTH = 32,
-    parameter int DEPTH = 8
+    // Data width. The design runs FLIT_W = 40 (linnea_v2_format_and_rtl_
+    // changes.md section 1), so that is what this defaults to; the FIFO
+    // itself is width-agnostic and never looks inside the word.
+    parameter int WIDTH = 40,
+    // Power of two >= 2 -- the wrap-bit pointer scheme depends on it, and
+    // the elaboration-time check below enforces it.
+    parameter int DEPTH = 4
 ) (
     input logic clk,
     input logic rst_n,

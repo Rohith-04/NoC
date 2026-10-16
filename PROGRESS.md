@@ -19,32 +19,43 @@ that keeps me close to that goal is fine"* — so everything stays Verilator-cle
 |---|---|
 | Steps 1–5 (input port, route compute, arbiter, crossbar, output port) | RTL + benches done, all green |
 | Step 6 `rtl/router_top.sv` | RTL done, `-Wall` lint clean |
-| Step 7 `tb/tb_router_top.sv` | **Done — `ALL 108 CHECKS PASSED`**, 8/8 mutations killed |
+| Step 7 `tb/tb_router_top.sv` | **Done — `ALL 104 CHECKS PASSED`**, 8/8 mutations killed |
 | Step 8 `tb/tb_router_chain.sv` (T10, T11) | **Done — `ALL 477 CHECKS PASSED`** |
-| Lint sweep (all 7 RTL tops) | clean under `-Wall` |
+| v2 flit format (40-bit flit, KIND at `[3:2]`, tag at `[39:14]`) + VC-matched VA | **Done** — absorbed across `rtl/*.sv` and the benches, all green |
+| `rtl/noc_mesh.sv` + `tb/tb_noc_mesh.sv` | **Done — `ALL 236 CHECKS PASSED`** |
+| `tb/noc_tb_pkg.sv` (flit codec + shared reporter) | **Done — imported by 7 benches, compiled first everywhere** |
+| `make regress` (four phases, 45 runs) | **Done — one command runs the whole suite** |
+| Lint sweep (all 8 RTL tops) | clean under `-Wall` |
 | Mutation suite (bench side) | **8/8 killed** |
-| Negative assertion suite (assertion side) | **`tools/assert_neg.sh` — 6/6 FIRED** |
+| Negative assertion suite (assertion side) | **`tools/assert_neg.sh` — 7/7 FIRED** |
 | Housekeeping (`files.f`, README) | **Done** |
-| Documentation (`docs/`, one MD per source file) | **Done — 17 files, all three sections, all required tables** |
+| Documentation (`docs/`, one MD per source file) | **Done — 20 files, all three sections, all required tables** |
 | Synthesis pass (spec §10 item 9) | **Out of scope** |
 
-Latest full sweep: all eight benches green, all seven lint targets clean,
-`git diff --stat rtl/` showing only the intended `noc_input_port.sv` change.
+Latest sweep: all nine benches green at the counts below. The whole v2
+change set (40-bit flit format, KIND, VC-matched VA, `noc_mesh`, the
+package, `make regress`) is uncommitted on top of `973ed2c`.
 
 ### Check counts (all should pass in a sweep)
 
+The suite is now **9 benches / 45 runs** under `make regress`: the nine
+benches below at default parameters, per-top lint, the `NUM_VC`/`FIFO_DEPTH`
+parameter matrix, and four mesh geometries.
+
 | Bench | Command | Result |
 |---|---|---|
-| `tb_fifo` | `make TOP=fifo sim` | green (953) |
+| `tb_fifo` | `make TOP=fifo sim` | green (879) |
 | `tb_route_compute` | `make TOP=route_compute sim` | green (49178) |
-| `tb_noc_input_port` | `make TOP=noc_input_port sim` | green (139) |
-| `tb_arbiter` | `make TOP=arbiter sim` | green (83) |
+| `tb_noc_input_port` | `make TOP=noc_input_port sim` | green (143) |
+| `tb_arbiter` | `make TOP=arbiter sim` | green (84) |
 | `tb_crossbar` | `make TOP=crossbar sim` | green (286) |
 | `tb_noc_output_port` | `make TOP=noc_output_port sim` | green (139) |
-| `tb_router_top` | `make TOP=router_top sim` | green (108) |
+| `tb_router_top` | `make TOP=router_top sim` | green (104) |
 | `tb_router_chain` | `make TOP=router_chain sim` | green (477) |
+| `tb_noc_mesh` | `make TOP=noc_mesh sim` | green (236) |
 | lint (each RTL top) | `make TOP=<module> lint` | clean |
-| assertions (6 families) | `bash tools/assert_neg.sh` | 6/6 FIRED |
+| full regression (45 runs) | `make regress` | exits non-zero on any failure |
+| assertions (7 families) | `bash tools/assert_neg.sh` | 7/7 FIRED |
 
 ---
 
@@ -339,11 +350,15 @@ clean afterwards (all six RTL files back to their originals).
 
 ## 7. Remaining work
 
-Everything through step 8 is done and green, including the documentation
-deliverable. What is left is optional polish and the eventual commit.
+Everything through step 8 is done and green, and so is the v2 round: the
+40-bit flit format with KIND, the VC-matched VA, `tb/noc_tb_pkg.sv`,
+`rtl/noc_mesh.sv` + `tb/tb_noc_mesh.sv`, and `make regress`. The
+documentation deliverable is complete at 20 files. What is left is optional
+polish and the eventual commit.
 
-1. **Documentation** — **done.** 17 files under `docs/`, one per source file
-   (`rtl/*.sv`, `tb/*.sv` including `mock_arbiter.sv`, plus `Makefile`), each
+1. **Documentation** — **done.** 20 files under `docs/`, one per source file
+   (`rtl/*.sv`, `tb/*.sv` including `mock_arbiter.sv` and `noc_tb_pkg.sv`,
+   plus `Makefile`), each
    with exactly three sections in order —
    `(1) Ports and state` → `(2) RTL explanation` → `(3) Testing explanation` —
    and each carrying both required tables:
@@ -351,7 +366,8 @@ deliverable. What is left is optional polish and the eventual commit.
    * port table with columns
      `| Signal | Width | Direction | Source → Destination | Working / description |`
      (for a bench top, whose module has no ports, this table documents the
-     interface presented to and extracted from the DUT);
+     interface presented to and extracted from the DUT; for the package, the
+     equivalents are its constants and its public API);
    * separate register/state table with columns
      `| Name | Width | Kind | Reset | Working / description |`.
 
@@ -367,6 +383,7 @@ deliverable. What is left is optional polish and the eventual commit.
    | `rtl/crossbar.sv` | `docs/rtl/crossbar.md` |
    | `rtl/noc_output_port.sv` | `docs/rtl/noc_output_port.md` |
    | `rtl/router_top.sv` | `docs/rtl/router_top.md` |
+   | `rtl/noc_mesh.sv` | `docs/rtl/noc_mesh.md` |
    | `Makefile` | `docs/Makefile.md` |
    | `tb/tb_fifo.sv` | `docs/tb/tb_fifo.md` |
    | `tb/tb_route_compute.sv` | `docs/tb/tb_route_compute.md` |
@@ -377,17 +394,20 @@ deliverable. What is left is optional polish and the eventual commit.
    | `tb/mock_arbiter.sv` | `docs/tb/mock_arbiter.md` |
    | `tb/tb_router_top.sv` | `docs/tb/tb_router_top.md` |
    | `tb/tb_router_chain.sv` | `docs/tb/tb_router_chain.md` |
+   | `tb/noc_tb_pkg.sv` | `docs/tb/noc_tb_pkg.md` |
+   | `tb/tb_noc_mesh.sv` | `docs/tb/tb_noc_mesh.md` |
 
-2. **Final verification sweep — run and green:**
+2. **Final verification sweep — now one command:** `make regress` runs the
+   nine benches at default parameters, per-top lint, the `NUM_VC` /
+   `FIFO_DEPTH` parameter matrix and four mesh geometries — 45 runs,
+   non-zero exit on any failure. Expected counts are in §1. The deeper
+   suites mutate source in place and stay separate invocations:
 
    ```
-   for t in fifo route_compute noc_input_port arbiter crossbar \
-            noc_output_port router_top router_chain; do make TOP=$t sim; done
-   for m in fifo route_compute noc_input_port arbiter crossbar \
-            noc_output_port router_top; do make TOP=$m lint; done
+   make regress                                          # 45 runs
    bash tools/mutate_all.sh && bash tools/mutate_out.sh   # 8/8 killed
-   bash tools/assert_neg.sh                               # 6/6 FIRED
-   git diff --stat rtl/                                   # only noc_input_port.sv
+   bash tools/assert_neg.sh                               # 7/7 FIRED
+   git diff --stat rtl/                                   # the two mutate scripts and assert_neg must leave it unchanged
    ```
 
 3. **Git.** Last commit is `973ed2c "Input port implementation without
@@ -403,6 +423,9 @@ deliverable. What is left is optional polish and the eventual commit.
    * `tools/` — mutation suite and assertion suite
    * `docs/` — the documentation deliverable
    * `PROGRESS.md` — handoff notes
+   * v2 round — 40-bit flit format with KIND and the VC-matched VA across
+     `rtl/*.sv` and `tb/*.sv`, plus the new `tb/noc_tb_pkg.sv`,
+     `rtl/noc_mesh.sv` + `tb/tb_noc_mesh.sv`, and `make regress`
 
 4. **Out of scope / not started:** synthesis pass at `NUM_VC` 2 and 4
    (spec §10 item 9), AXI4-Stream wrapper, additional routing algorithms.
@@ -413,22 +436,26 @@ deliverable. What is left is optional polish and the eventual commit.
 
 | File | Role |
 |---|---|
-| `linnea_router_implementation_spec.md` | authoritative spec (§3 timeline, §4 modules, §5 seams, §6 credit loop, §8 verification plan T1–T10, §9 change list, §10 build order) |
+| `linnea_router_implementation_spec.md` | v1 spec (§3 timeline, §4 modules, §5 seams, §6 credit loop, §8 verification plan T1–T10, §9 change list, §10 build order) |
+| `linnea_v2_format_and_rtl_changes.md` | v2 spec (§3 flit format, §4 router RTL changes, §6 mesh/NI); **authoritative over the v1 spec wherever the two disagree** |
 | `rtl/fifo.sv` | reference style; Step 0, verified |
 | `rtl/route_compute.sv` | Step 2, verified (49178 checks) |
-| `rtl/noc_input_port.sv` | Step 1 + spec §8 `in_pkt` flit-sequence assertion; 139 green |
-| `rtl/arbiter.sv` | Step 3, VA + SA, `xy_legal`, credit counters; 83 green |
+| `rtl/noc_input_port.sv` | Step 1 + spec §8 `in_pkt` flit-sequence assertion; 143 green |
+| `rtl/arbiter.sv` | Step 3, VA + SA, `xy_legal`, credit counters; 84 green (VA is VC-matched in v2 — one row per output port *and* output VC, no column stage, no `va_gnt_out_vc` port) |
 | `rtl/crossbar.sv` | Step 4, 3 assertions; 286 green, mutation-tested |
 | `rtl/noc_output_port.sv` | Step 5, header merge + link register + SVA; 139 green, mutation-tested |
 | `rtl/router_top.sv` | Step 6, lint clean |
-| `tb/tb_router_top.sv` | Step 7, **108 green**, mutation-tested |
+| `rtl/noc_mesh.sv` | v2 §6 mesh: `ROWS`×`COLS` of `router_top`, flat packed boundary ports, elaboration-time `generate if` per direction, `walls` assertion block; 236 green via `tb_noc_mesh` |
+| `tb/tb_router_top.sv` | Step 7, **104 green**, mutation-tested |
 | `tb/tb_router_chain.sv` | Step 8, **477 green** (T10a–d, §6 credit loop, T11 scoreboard) |
+| `tb/tb_noc_mesh.sv` | mesh self-test, **236 green** — every tile sends to every tile; integrity + ejection-tile scoreboard, no routing oracle |
+| `tb/noc_tb_pkg.sv` | v2 flit codec + shared reporter — the only file that knows the flit field map; imported by 7 benches, compiled first everywhere |
 | `tb/mock_arbiter.sv` | support file, auto-included by Makefile |
-| `Makefile` | Verilator-only `sim` / `lint` / `wave` / `clean` |
+| `Makefile` | Verilator-only `sim` / `lint` / `regress` / `wave` / `clean` |
 | `files.f` | compile list: slang-server (`.slang/server.json -f files.f`) and VCS later |
 | `README.md` | features, build/lint/wave, **Testbench Wiring Rules**, **Verilator Language Limits Hit Here** |
 | `docs/` | one Markdown per source file, three sections each (§7 item 1) |
-| `tools/mutate_all.sh`, `tools/mutate_out.sh` | RTL mutation suite, **bench** non-vacuity (no `--assert`) |
-| `tools/assert_neg.sh` | RTL mutation suite, **assertion** non-vacuity (`--assert` on), one case per family |
+| `tools/mutate_all.sh`, `tools/mutate_out.sh` | RTL mutation suite, **bench** non-vacuity (no `--assert`); 6 + 2 mutants, all killed |
+| `tools/assert_neg.sh` | RTL mutation suite, **assertion** non-vacuity (`--assert` on), one case per family; 7 cases, all FIRED |
 | `/tmp/opencode/rt.log` | last `tb_router_top` run log |
 | `/tmp/opencode/assert_neg.bak.*` | scratch backups used by `assert_neg.sh` (restored on `EXIT`) |

@@ -35,17 +35,17 @@ logger, the NI pipe and the credit assembly and never connected to a port.
 |---|---|---|---|---|
 | `clk` | 1 | input | bench oscillator → `u_a`, `u_b`, `u_c` (and every `posedge` process in the bench) | `CLK_PERIOD = 10ns`, toggled every 5 ns. Single clock for the whole chain; nothing in the bench is asynchronous. |
 | `rst_n` | 1 | input | `reset_dut()` → the three DUTs | Active-low *synchronous* reset (the DUT convention, same as `fifo`). Held low for five posedges, then released on a negedge so it is stable a full half-cycle before the next active edge. |
-| `a_in_data`, `b_in_data`, `c_in_data` | `[NUM_PORTS-1:0][31:0]` | input | `link_and_inject`: LOCAL ← oldest matching flit of `tx_q`; EAST/WEST ← neighbour's registered `*_out_*` → DUT `in_flit_data` | One 32-bit flit per input port. Port indices are `LOCAL_IDX` 0, NORTH 1, `EAST_IDX` 2, `WEST_IDX` 3, SOUTH 4. A's WEST, C's EAST and everybody's NORTH/SOUTH carry no traffic and are held at 0. The whole array is rewritten from scratch on every negedge. |
+| `a_in_data`, `b_in_data`, `c_in_data` | `[NUM_PORTS-1:0][FLIT_W-1:0]` | input | `link_and_inject`: LOCAL ← oldest matching flit of `tx_q`; EAST/WEST ← neighbour's registered `*_out_*` → DUT `in_flit_data` | One `FLIT_W`-bit flit per input port. Port indices are `LOCAL_IDX` 0, NORTH 1, `EAST_IDX` 2, `WEST_IDX` 3, SOUTH 4. A's WEST, C's EAST and everybody's NORTH/SOUTH carry no traffic and are held at 0. The whole array is rewritten from scratch on every negedge. |
 | `a_in_valid`, `b_in_valid`, `c_in_valid` | `[NUM_PORTS-1:0]` | input | same → DUT `in_flit_valid` | Per-port "the data/VC next to me is a real flit this cycle". Zeroed before the copies, so an idle or absent port is a clean 0 rather than a stale 1 — which is what `router_top`'s tie-off expects to see. |
-| `a_in_vc`, `b_in_vc`, `c_in_vc` | `[NUM_PORTS-1:0][1:0]` | input | same → DUT `in_vc_id` | Downstream VC id travelling *beside* the flit (assumption D3: the header's own `[3:2]` field is payload and is ignored). |
-| `a_out_data`, `b_out_data`, `c_out_data` | `[NUM_PORTS-1:0][31:0]` | output | DUT `out_flit_data` → neighbour's input at the next negedge (A.EAST→B.WEST, B.EAST→C.WEST, B.WEST→A.EAST, C.WEST→B.EAST) and → `r_out_data` | The link-transmit registers. They only change at a posedge, which is what makes the negedge copy in §2.3 a faithful wire model. |
+| `a_in_vc`, `b_in_vc`, `c_in_vc` | `[NUM_PORTS-1:0][VC_W-1:0]` | input | same → DUT `in_vc_id` | Downstream VC id travelling *beside* the flit. The sideband is authoritative: assumption D3 says routers never read the header's KIND field, so the copy in the header is payload, not identity. |
+| `a_out_data`, `b_out_data`, `c_out_data` | `[NUM_PORTS-1:0][FLIT_W-1:0]` | output | DUT `out_flit_data` → neighbour's input at the next negedge (A.EAST→B.WEST, B.EAST→C.WEST, B.WEST→A.EAST, C.WEST→B.EAST) and → `r_out_data` | The link-transmit registers. They only change at a posedge, which is what makes the negedge copy in §2.3 a faithful wire model. |
 | `a_out_valid`, `b_out_valid`, `c_out_valid` | `[NUM_PORTS-1:0]` | output | DUT → `r_out_valid` (logger, NI pipe) and the neighbour's `*_in_valid` | Per-port "a flit is on this link during this cycle". This is the signal `rx_logger` keys off, and index `LOCAL_IDX` is what triggers an ejection credit in `ni_pipe`. |
-| `a_out_vc`, `b_out_vc`, `c_out_vc` | `[NUM_PORTS-1:0][1:0]` | output | DUT → `r_out_vc` and the neighbour's `*_in_vc` | Sideband that must travel with its flit (asserted inside `noc_output_port`); the NI pipe decodes it to decide which VC's credit to send back. |
+| `a_out_vc`, `b_out_vc`, `c_out_vc` | `[NUM_PORTS-1:0][VC_W-1:0]` | output | DUT → `r_out_vc` and the neighbour's `*_in_vc` | Sideband that must travel with its flit (asserted inside `noc_output_port`); the NI pipe decodes it to decide which VC's credit to send back. |
 | `a_cred_ret`, `b_cred_ret`, `c_cred_ret` (`credit_return_valid`) | `[NUM_PORTS-1:0][NUM_VC-1:0]` | output | DUT → `ds_credit_assembly` (directional indices) and `link_and_inject`'s credit settling (LOCAL index) | One bit per VC: "a slot has just been freed in *this* router's input port *p*". It is returned by the router that **received** flits, so it has to be routed back to the neighbour that **sent** them — hence A.EAST's credits come out of B's WEST port, not A's. |
 | `a_ds_cred`, `b_ds_cred`, `c_ds_cred` (`ds_credit_valid`) | `[NUM_PORTS-1:0][NUM_VC-1:0]` | input | `ds_credit_assembly`: directional ← neighbour's `credit_return_valid`; LOCAL ← `ni_pipe[r][NI_LAT]` → DUT `ds_credit_valid` | One bit per VC: "there is a free slot downstream on this outgoing link", which the arbiter counts as a credit. Absent ports are left at 0 — precisely the value `router_top`'s "no credit may come back on a link that does not exist" assertion demands. |
-| `r_out_data` | `[N_RTR-1:0][NUM_PORTS-1:0][31:0]` | output (mirror) | continuous `assign` from `a_out_data` / `b_out_data` / `c_out_data` → `rx_logger`, `ni_credit_pipe` | Whole-DUT-array copy folded into one run-time-indexable aggregate, so "router *r*, port *o*" can be selected with a variable. Never used in a port connection. |
+| `r_out_data` | `[N_RTR-1:0][NUM_PORTS-1:0][FLIT_W-1:0]` | output (mirror) | continuous `assign` from `a_out_data` / `b_out_data` / `c_out_data` → `rx_logger`, `ni_credit_pipe` | Whole-DUT-array copy folded into one run-time-indexable aggregate, so "router *r*, port *o*" can be selected with a variable. Never used in a port connection. |
 | `r_out_valid` | `[N_RTR-1:0][NUM_PORTS-1:0]` | output (mirror) | continuous `assign` from `a_out_valid` / `b_out_valid` / `c_out_valid` → logger, hop tallies, `ni_credit_pipe` | The logger's trigger. |
-| `r_out_vc` | `[N_RTR-1:0][NUM_PORTS-1:0][1:0]` | output (mirror) | continuous `assign` from `a_out_vc` / `b_out_vc` / `c_out_vc` → logger, `ni_credit_pipe` | Records which VC each flit was switched onto. |
+| `r_out_vc` | `[N_RTR-1:0][NUM_PORTS-1:0][VC_W-1:0]` | output (mirror) | continuous `assign` from `a_out_vc` / `b_out_vc` / `c_out_vc` → logger, `ni_credit_pipe` | Records which VC each flit was switched onto. |
 | `r_cred_ret` | `[N_RTR-1:0][NUM_PORTS-1:0][NUM_VC-1:0]` | output (mirror) | continuous `assign` from `a_cred_ret` / `b_cred_ret` / `c_cred_ret` → credit assembly, injection settling | Router-indexed view of every returned credit. |
 
 Wiring discipline (README "Testbench Wiring Rules"): no port connection and no
@@ -56,29 +56,33 @@ router's port arrays are connected to its instance whole.
 ### 1.2 Registers and state
 
 Everything declared at module scope that is not part of §1.1. `Kind` says what
-the declaration *is*; `Reset` says what clears it in a simulation.
+the declaration *is*; `Reset` says what clears it in a simulation. The bench
+imports `noc_tb_pkg` first, so `FLIT_W` (40), `TAG_W` (26), `FLIT_*`, `check`,
+`check_true`, `checks` and `errors` are all the package's, not redeclared
+here.
 
 | Name | Width | Kind | Reset | Working / description |
 |---|---|---|---|---|
 | `NUM_PORTS` | 1 (`int`) | localparam | elaboration | 5. Width of every port-indexed array; fixed by the 5×5 crossbar. Only ports 0, 2 and 3 exist in this topology. |
-| `NUM_VC` | 1 (`int`) | localparam | elaboration | 2. VCs per port; sizes the credit vectors `[NUM_VC-1:0]` and the per-VC inflight accounting. |
+| `NUM_VC` | 1 (`int`) | parameter | elaboration | `4`. VCs per port; sizes the credit vectors `[NUM_VC-1:0]` and the per-VC inflight accounting, and drives `VC_W` below. A `make regress` knob: `-GNUM_VC` with 2, 4 or 8. |
+| `VC_W` | 1 (`int`) | localparam | elaboration | `(NUM_VC > 1) ? $clog2(NUM_VC) : 1`, i.e. `2` at the default. Width of every VC sideband and of the `VC_W'(k)` casts that compare one against an index. |
 | `N_RTR` | 1 (`int`) | localparam | elaboration | 3. Routers in the line; sizes `r_*`, `eject_cnt`, `ni_pipe`, `inj_inflight`, and every loop over routers. |
 | `LOCAL_IDX`, `EAST_IDX`, `WEST_IDX` | 1 each (`int`) | localparam | elaboration | 0, 2, 3. The three port indices this chain uses (NORTH 1 and SOUTH 4 are named nowhere in the bench — they can only ever be absent). |
-| `FIFO_DEPTH` | 1 (`int`) | localparam | elaboration | 8. Passed to all three DUTs as their input-FIFO depth, *and* used as the per-VC inflight budget the bench's LOCAL driver enforces on itself. |
+| `FIFO_DEPTH` | 1 (`int`) | parameter | elaboration | `4`. Passed to all three DUTs as their input-FIFO depth, *and* used as the per-VC inflight budget the bench's LOCAL driver enforces on itself. A `make regress` knob: `-GFIFO_DEPTH` with 4 or 8. |
 | `LOCAL_CRED` | 1 (`int`) | localparam | elaboration | 4. Passed as `LOCAL_CREDITS` — the NI receive-buffer depth per VC, and the tight pool the section 6 test exercises. |
 | `CLK_PERIOD` | `realtime` | localparam | elaboration | 10 ns. Half period 5 ns → 100 MHz. |
 | `NI_LAT` | 1 (`int`) | localparam | elaboration | 0. Extra stages in `ni_pipe` beyond its receive register; the single knob that sets the ejection-credit loop length (§2.4). |
 | `MAX_STALL` | 1 (`int`) | localparam | elaboration | 500. Watchdog threshold: no new logged flit for more than this many cycles while work is outstanding is a deadlock. |
 | `PKT_FLITS` | 1 (`int`) | localparam | elaboration | 16. Length of the single packet used by the section 6 credit-loop test. |
 | `Y_COORD`, `X_A`, `X_B`, `X_C` | 3 (`logic [2:0]`) | localparam | elaboration | 1, 0, 1, 2. Router coordinates; every legal route in this test set is therefore EAST, WEST or LOCAL. |
-| `FLIT_BODY`, `FLIT_HEAD`, `FLIT_TAIL`, `FLIT_HEAD_TAIL` | 2 each (`logic [1:0]`) | localparam | elaboration | `00`, `01`, `10`, `11`. Section 2 flit-type encoding, used by the constructors and by the scoreboard's sequence check. |
+| `FLIT_BODY`, `FLIT_HEAD`, `FLIT_TAIL`, `FLIT_HEAD_TAIL` | 2 each (`logic [1:0]`) | constant (imported) | elaboration | `00`, `01`, `10`, `11`. Section 2 flit-type encoding, now owned by `noc_tb_pkg` and used by the constructors and by the scoreboard's sequence check. |
 | `DIR_LOCAL`, `DIR_EAST`, `DIR_WEST` | 4 each (`logic [3:0]`) | localparam | elaboration | `0000`, `0010`, `0100`. The three direction codes this line can produce; `rx_route()` results are compared against them. |
-| `rx_t`, `exp_t`, `tx_t` | structs | typedef | n/a | The three record types: one logged hop, one injected packet's reference, one queued flit. All queues below are queues of structs — never `type q[N][$]`, which this simulator corrupts under a run-time index. |
+| `rx_t`, `exp_t`, `tx_t` | structs | typedef | n/a | The three record types: one logged hop, one injected packet's reference, one queued flit. `rx_t.data` and `tx_t.data` are `FLIT_W` wide, `exp_t.tag` is `TAG_W` wide, and `exp_t` carries `kind` alongside `vc` — the packet's KIND, scored independently of the VC because the VC changes at every hop and KIND does not. All queues below are queues of structs — never `type q[N][$]`, which this simulator corrupts under a run-time index. |
 | `clk`, `rst_n` | 1 each | variable (clock / reset) | `clk` starts 0 and self-toggles; `rst_n` 0 at time 0, released by `reset_dut()` | Shared clock and reset nets; both are in §1.1 as DUT ports. |
 | `a_*`, `b_*`, `c_*` (24 declarations) | see §1.1 | wire (logic) | cleared to 0 while `!rst_n` | The three DUT port sets. Bench-driven members are written only by `link_and_inject` (inputs) or by `ds_credit_assembly` (`ds_cred`); DUT-driven members are read-only to the bench. |
 | `r_out_data`, `r_out_valid`, `r_out_vc`, `r_cred_ret` | see §1.1 | wire (continuous assign) | follows the DUT | The four aggregates of §1.1; they hold no state of their own. |
 | `tx_q` | dynamic queue of `tx_t` | queue | starts empty; `send()` pushes, the driver `delete()`s | The single injection queue. Carries `rtr` *inside* the entry rather than being one queue per router, because an array of queues indexed by a variable corrupts silently in this simulator. Oldest matching entry wins. |
-| `exp_q` | dynamic queue of `exp_t` | queue | `exp_q.delete()` in `reset_dut()` and at the top of T11 | The scoreboard's reference: one entry per injected packet with `tag`, `src`, `dest`, `len`, `vc` and the running `got` count. Deliberately records **no** expected arrival slot. |
+| `exp_q` | dynamic queue of `exp_t` | queue | `exp_q.delete()` in `reset_dut()` and at the top of T11 | The scoreboard's reference: one entry per injected packet with `tag`, `src`, `dest`, `len`, `vc`, `kind` and the running `got` count. Deliberately records **no** expected arrival slot. |
 | `rx` | dynamic queue of `rx_t` | queue | `clear_rx()` between tests | The receive log: one entry per flit leaving any router on any port, with router, port, VC, cycle and payload. |
 | `sb_en` | 1 | register (`bit`) | 0 at declaration; set only inside T11, cleared on exit and by `reset_dut()` | Arms `sb_eject`. T10 and the credit-loop test inject without registering expectations, so scoring every ejection unconditionally would call each of them "a flit nobody injected". |
 | `sb_outstanding` | 32 (`int`) | counter | `sb_reset()` | Registered packets that have not yet delivered their last flit. Incremented where an entry is created, decremented the moment `got` reaches `len`. Read by `work_pending()`. |
@@ -93,10 +97,10 @@ the declaration *is*; `Reset` says what clears it in a simulation.
 | `ni_pipe` | `[N_RTR-1:0][NI_LAT:0][NUM_VC-1:0]` | array (shift register) | `'0` while `!rst_n` | The NI ejection-credit pipe: one `NI_LAT+1`-deep, `NUM_VC`-wide pipe per router, feeding `ds_credit_valid[LOCAL]` (§2.4). |
 | `inj_inflight` | `int` `[N_RTR][NUM_VC]` | array | 0 at time 0, 0 while `!rst_n` | Inflight flits per (router, VC) on the LOCAL injection path. Bounded by `FIFO_DEPTH`; decremented when that router returns a LOCAL credit. |
 | `drv_idx`, `drv_vc` | 32 each (`int`) | variable | n/a (scratch) | Driver scratch, deliberately at module scope so only `link_and_inject` can write them. `drv_idx` is the chosen `tx_q` entry, `drv_vc` its VC. |
-| `checks` | 32 (`int`) | counter | 0 | Total assertions recorded; incremented by `check`, `check_true` and by every scored flit in `sb_eject` (silent on success, printed on failure). |
-| `errors` | 32 (`int`) | counter | 0 | Failures. Three paths bump it directly without a `check`: `send()`'s router-range guard, the driver's VC-range guard, and the watchdog. |
+| `checks` | 32 (`int`) | counter (imported) | 0 | Total assertions recorded; the package's `check`/`check_true` increment it, and so do every scored flit in `sb_eject` and the watchdog's one-shot failure (silent on success, printed on failure). |
+| `errors` | 32 (`int`) | counter (imported) | 0 | Failures. Three paths bump it directly without a `check`: `send()`'s router-range guard, the driver's VC-range guard, and the watchdog. |
 | `cyc` | 32 (`int`) | counter | 0 | Free-running cycle counter, `cyc <= cyc + 1` on posedge. Read *pre-edge* by the logger, so consecutive log entries differ by exactly 1 and `max_gap == 1` means back-to-back. |
-| `tag_seq` | 18 (`logic [17:0]`) | register | 18'h0001 | The packet-tag sequence T11 hands out one per packet; tags ride in `data[31:14]` and are how every test identifies its flits. |
+| `tag_seq` | `TAG_W` (26) (`logic [TAG_W-1:0]`) | register | `18'h0001` | The packet-tag sequence T11 hands out one per packet; tags are planted in the flit's tag region and read back with `flit_tag()`, and they are how every test identifies its flits. |
 
 Test-local variables (`i0`, `base`, `exp_hops`, `sent`, `n_ht`, the per-test
 tags …) live inside the test tasks and are not module scope.
@@ -105,7 +109,7 @@ tags …) live inside the test tasks and are not module scope.
 
 ## 2. RTL explanation
 
-### 2.1 Chain topology and the `HAS_*` tie-offs (lines 268–344)
+### 2.1 Chain topology and the `HAS_*` tie-offs (lines 278–354)
 
 A horizontal line at Y = 1, X = 0, 1, 2, with EAST = +X:
 
@@ -113,8 +117,8 @@ A horizontal line at Y = 1, X = 0, 1, 2, with EAST = +X:
  (0,1) A --EAST--> B --EAST--> C (2,1)
 ```
 
-The three instances share `NUM_PORTS(5)`, `NUM_VC(2)`, `LOCAL_IDX(0)`,
-`FIFO_DEPTH(8)` and `LOCAL_CREDITS(LOCAL_CRED = 4)`; they differ only in
+The three instances share `NUM_PORTS(5)`, `NUM_VC(4)`, `LOCAL_IDX(0)`,
+`FIFO_DEPTH(4)` and `LOCAL_CREDITS(LOCAL_CRED = 4)`; they differ only in
 coordinates and in the presence mask:
 
 | instance | `CUR_X` | `HAS_LOCAL` | `HAS_NORTH` | `HAS_EAST` | `HAS_WEST` | `HAS_SOUTH` |
@@ -181,7 +185,7 @@ convention reinforce each other:
   therefore carry consecutive cycle numbers, which is exactly what
   `max_gap() == 1` asserts: one flit per cycle on that (router, port) pair.
 
-### 2.3 The link and injection driver: `tx_q` and `link_and_inject` (lines 783–925)
+### 2.3 The link and injection driver: `tx_q` and `link_and_inject` (lines 752–894)
 
 One `always @(negedge clk)` process owns every `*_in_*` array — there is no
 second driver anywhere, so no element of them can be written from two places.
@@ -213,7 +217,7 @@ Tests reach this path only through `send(rtr, data, vc)`, which guards the
 router number (an out-of-range index is reported and counted as an error
 instead of silently indexing `tx_q`) and pushes `{rtr, vc, data}`.
 
-### 2.4 Credits: the router-to-router wires and the `ni_pipe` network interface (lines 710–781)
+### 2.4 Credits: the router-to-router wires and the `ni_pipe` network interface (lines 679–750)
 
 `ds_credit_assembly` is a single `always_comb` that builds all three
 `*_ds_cred` arrays, so each has exactly one driver. Two kinds of source, and
@@ -229,9 +233,10 @@ they are not interchangeable:
 
 `ni_pipe` is the network-interface model. At each posedge, a flit observed on
 router *r*'s LOCAL output sets stage 0 of that router's pipe for the VC it was
-switched onto (indexed by an explicit compare against `k`, not by the 2-bit
-sideband directly, so an out-of-range value cannot select past the end); the
-stages then shift. With `NI_LAT = 0` stage 0 is wired straight into
+switched onto (indexed by an explicit compare against `k`, not by the sideband
+directly, which is `VC_W` = clog2(`NUM_VC`) bits wide, so an out-of-range
+value cannot select past the end); the stages then shift. With `NI_LAT = 0`
+stage 0 is wired straight into
 `ds_credit_valid[LOCAL]`, and the arbiter counts it at the next posedge — the
 two-cycle "flit on the wire → credit usable" shape of section 6's registered
 credit return, i.e. "visible g+2, usable g+3" for a flit that went out at g+1.
@@ -244,7 +249,7 @@ of any back-to-back run stalls for a cycle. The credit-loop test in §3.5 is
 what noticed — running it with two more stages of NI latency turned the last
 `max_gap` into 2.
 
-### 2.5 The receive log (lines 604–708)
+### 2.5 The receive log (lines 567–677)
 
 `rx_logger` runs on posedge (while `rst_n`) and sweeps all `N_RTR ×
 NUM_PORTS` combinations of `r_out_valid`. Every hit becomes one `rx_t` —
@@ -270,38 +275,45 @@ While logging it does three things that would otherwise be end-of-test walks:
   at the end of the test.
 
 The accessors tests are written against are `rx_n()`, `rx_tag()`, `rx_type()`,
-`rx_route()` (the `[13:10]` route field *as it appears on a link* — a single
-router never consumes its own outgoing route field, so this is the only
-outside observation of the next router's merge input), `hop_n(rtr, port, tag)`,
-`max_gap(rtr, port, tag)` and `find_tag(tag)`. `clear_rx()` empties the log and
-zeroes the tallies between tests.
+`rx_route()` (the route field *as it appears on a link*, read back with
+`flit_route()` — a single router never consumes its own outgoing route field,
+so this is the only outside observation of the next router's merge input),
+`hop_n(rtr, port, tag)`, `max_gap(rtr, port, tag)` and `find_tag(tag)`.
+`clear_rx()` empties the log and zeroes the tallies between tests.
 
-### 2.6 Flit constructors and the deliberately wrong route field (lines 368–427)
+### 2.6 Flit constructors and the deliberately wrong route field (lines 362–378)
 
-`mk_head`, `mk_ht`, `mk_body` and `mk_tail` build the section 2 formats:
-`[1:0]` type, `[3:2]` VC, `[6:4]` dx, `[9:7]` dy, `[13:10]` route, `[31:14]`
-tag. Every test passes `DIR_LOCAL` as the header's `route` argument on purpose:
+`mk_head`, `mk_ht`, `mk_body` and `mk_tail` now come from `noc_tb_pkg` — the
+one file allowed to know where a field lives. A header is assembled as
+`TYPE | KIND | DEST_X | DEST_Y | ROUTE | [FLIT_W-1:14] tag`, so the fourth
+argument of `mk_head`/`mk_ht` is the packet's KIND rather than its VC: the VC
+is link sideband and changes at every hop, whereas KIND is written once by the
+source NI and scored for survival. Every test passes `DIR_LOCAL` as the
+header's `route` argument on purpose:
 on a LOCAL input port `route_compute` ignores `route_in` entirely and computes
 the exit direction from the destination, so the injected value is the one
 field in the header that must *not* survive to the wire. If the output-port
 merge ever stopped happening, the header would leave with `DIR_LOCAL` instead
 of the next hop and T10 would say so.
 
-`mk_body`/`mk_tail` fill `[31:2]` with `{tag, 12'h201}` and `{tag, 12'h401}`
-— deliberately non-zero *in `[13:10]`* (`DIR_EAST` and `DIR_WEST`), the exact
-field the merge writes. A real direction value there, rather than a run of
+`mk_body`/`mk_tail` fill `[FLIT_W-1:2]` with `{tag, 12'h201}` and
+`{tag, 12'h401}` — deliberately non-zero in the route region (`DIR_EAST` and
+`DIR_WEST`), the exact field the merge writes. A real direction value there,
+rather than a run of
 zeros, is what makes an unwanted overwrite of a BODY/TAIL observable: the
 lookahead for those payload bits is never the value they already carry. These
-two constants are kept identical to `tb_router_top`'s, because the chain tests
-compare a received body against the one that was sent.
+two constants used to be duplicated here and in `tb_router_top` under a comment
+warning that they "must stay identical, because the chain tests compare a
+received body against the one that was sent"; there is now one copy in the
+package, so the guard has nothing left to enforce.
 
-### 2.7 The scoreboard (lines 429–590)
+### 2.7 The scoreboard (lines 380–565)
 
-Every packet registered in `exp_q` carries `tag`, `src`, `dest`, `len`, `vc`
-and `got` — and deliberately **no expected arrival slot**. `sb_eject(rtr,
+Every packet registered in `exp_q` carries `tag`, `src`, `dest`, `len`, `vc`,
+`kind` and `got` — and deliberately **no expected arrival slot**. `sb_eject(rtr,
 data)` runs on every LOCAL ejection while `sb_en` is set and works through:
 
-1. **Match by tag** (`data[31:14]`). No match is a hard failure — "scoreboard:
+1. **Match by tag** (`flit_tag(data)`). No match is a hard failure — "scoreboard:
    flit nobody injected".
 2. **No overrun.** `got >= len` before the packet finished is "more flits than
    sent".
@@ -311,11 +323,14 @@ data)` runs on every LOCAL ejection while `sb_en` is set and works through:
    `len-1` must be `TAIL`, everything between must be `BODY`. The log holds
    every hop of every packet mixed together, so index is the only meaningful
    axis.
-5. **Header integrity for heads**: `dx`/`dy` still name the real destination
-   (nothing may touch them across two hops), `route[13:10]` reads `DIR_LOCAL`
+5. **Header integrity for heads**: `flit_dst_x()`/`flit_dst_y()` still name the
+   real destination
+   (nothing may touch them across two hops), `flit_route()` reads `DIR_LOCAL`
    at the packet's own destination — the terminating lookahead that tells the
-   NI "this is yours" — and `vc[3:2]` still equals the injected VC (assumption
-   D3: it rides along as payload and must survive byte-identical).
+   NI "this is yours" — and `flit_kind()` still equals the `kind` the packet
+   was injected with (assumption D3: KIND rides along as payload and must
+   survive byte-identical; the VC, which does change at every hop, is not what
+   is being compared).
 
 Only then does it bump `sb_got_flits`, write the entry back and, when `got`
 reaches `len`, bump `sb_complete` and decrement `sb_outstanding`.
@@ -329,7 +344,7 @@ arrive in order, at the right router, exactly once, with their fields intact.
 Within a packet the order is checked (rule 4); between packets it is not, and
 `exp_q` never recorded a slot to check it against.
 
-### 2.8 The helpers, and why `work_pending()` is two counter reads (lines 592–602, 927–1010)
+### 2.8 The helpers, and why `work_pending()` is two counter reads (lines 555–565, 896–979)
 
 - **`drain(max_cycles)`** runs negedges until `tx_q` is empty *and* `rx_n()`
   has not moved for 32 consecutive cycles, or the budget runs out, then checks
@@ -370,12 +385,15 @@ the hop tallies — is a running total maintained where the event happens, and
 `work_pending()` is a pair of O(1) reads. The watchdog calls it on every clock
 edge and `wait_idle()` on every iteration, so O(1) is required anyway.
 
-### 2.9 Recording a pass or a failure (lines 349–366)
+### 2.9 Recording a pass or a failure (lines 356–360, and `tb/noc_tb_pkg.sv` lines 327–345)
 
-`check(what, actual, expected)` increments `checks`, then compares with `===`
-and prints `[PASS]` with the actual value, or `[FAIL]` with
-`got … exp …` and increments `errors`. `check_true(what, cond)` is the same
-for a predicate. Two things worth knowing when reading a transcript:
+`check` and `check_true` come from `noc_tb_pkg` — the bench's local copies are
+gone, so `checks` and `errors` are the package's counters. `check(what,
+actual, expected)` increments `checks`, then compares with `!==` and prints
+`[FAIL]` with `got … exp …` and increments `errors`, or `[PASS]` with the
+actual value; `check_true(what, cond)` is the same for a predicate. Both pad
+the message to `%-62s`, so transcripts line up across benches. Two things
+worth knowing when reading a transcript:
 
 - `check` prints `actual` as `%h`, so `T11 every packet fully delivered 24`
   is 36 packets and `T11 every hop logged exactly once 12b` is 299 hops.
@@ -390,7 +408,7 @@ checks); else …` and `$finish`. `+vcd` on the run binary dumps
 
 ## 3. Testing explanation
 
-**Bench:** `tb/tb_router_chain.sv`, top module `tb_router_chain` (1467 lines).
+**Bench:** `tb/tb_router_chain.sv`, top module `tb_router_chain` (1444 lines).
 **Run:** `make TOP=router_chain sim` — reports **`ALL 477 CHECKS PASSED`**
 (0 `[FAIL]` lines, no assertion errors). Tests execute in the `main` block in
 the order below; each starts with `clear_rx()` so the log and hop tallies are
@@ -431,8 +449,9 @@ HEAD + two BODY + TAIL (tag `18'hC_2003`) from A to C, `drain(600)`, expecting
   value each time (`DIR_EAST` at A, `DIR_LOCAL` at B) — checked at all three
   routers, so a field that was merely forwarded would fail hop 2;
 - BODY and TAIL are compared **bit-for-bit** against `mk_body`/`mk_tail` at
-  both hops and again after ejection. Their payload carries a real direction in
-  `[13:10]`, so a merge applied to every flit instead of to heads changes them;
+  both hops and again after ejection. Their payload carries a real direction
+  value where the merge writes, so a merge applied to every flit instead of to
+  heads changes them;
 - all four flits stay together: each index is checked for the right router and
   the right output port, so no hop may drop, duplicate or reroute one.
 
@@ -463,23 +482,29 @@ CL ejection at C ran at one flit per cycle 1
 
 `max_gap == 1` on all three means no link ever stalled, so the credit return
 loop closed in time on both hops *and* on ejection. Directional outputs hold
-`FIFO_DEPTH = 8` credits against a loop of about 4 and are never in danger;
-the interesting hop is C's ejection, where `LOCAL_CREDITS = 4` faces the
-three-cycle loop of `NI_LAT = 0`. That is the balance section 6 calls
-sustainable, and this test is its confirmation: with two more cycles of NI
-latency the fourth flit stalls and this last `max_gap` reads 2 — which is
-exactly the failure mode the spec warns about.
+`FIFO_DEPTH` credits — 4 by default — against a loop of about 4, and this run
+is what shows that is enough; the interesting hop is C's ejection, where
+`LOCAL_CREDITS = 4` faces the three-cycle loop of `NI_LAT = 0`. That is the
+balance section 6 calls sustainable, and this test is its confirmation: with
+two more cycles of NI latency the fourth flit stalls and this last `max_gap`
+reads 2 — which is exactly the failure mode the spec warns about.
 
 ### 3.6 T11 — random traffic with a scoreboard (task `t11_random_traffic`, 11 printed + 366 scoreboard checks)
 
 Twelve rounds × three sources = 36 packets. For each: `len = $urandom_range(1,
 6)`, destination any *other* router (dest == source on a LOCAL input is not a
-legal LOCAL pair in section 2's table), a random VC from `NUM_VC`, and a fresh
-tag from `tag_seq`. Each packet is pushed into `exp_q` (so `sb_outstanding`
-and `sb_total_flits` grow at generation time), `sb_en` is raised, and
-`wait_idle(4000)` waits for the scoreboard to be fully paid. The mix keeps the
-middle router forwarding east and west simultaneously, on both VCs. The run
-prints `36 packets, 6 of them single-flit, 129 flits`.
+legal LOCAL pair in section 2's table), a random VC from `NUM_VC`, a KIND
+derived as `(src + dest + len) % 4` rather than drawn from the RNG, and a fresh
+tag from `tag_seq`. The KIND is derived on purpose: a fourth `$urandom_range`
+would shift every later `len`/`dest`/`vc` draw and quietly change the traffic
+this test has always run, which would make "did the KIND change break
+anything" unanswerable — and `src`/`dest`/`len` already move enough between
+packets to exercise all four encodings. Each packet is pushed into `exp_q`
+(so `sb_outstanding` and `sb_total_flits` grow at generation time), `sb_en`
+is raised, and `wait_idle(4000)` waits for the scoreboard to be fully paid.
+The mix keeps the middle router forwarding east and west simultaneously, on
+any of the `NUM_VC` VCs. The run prints `36 packets, 6 of them single-flit,
+129 flits`.
 
 Every final check, and what it is really proving:
 
@@ -498,49 +523,58 @@ Every final check, and what it is really proving:
 Throughout, the watchdog runs: if a credit loop wedged under this load, the
 run fails with the outstanding packets named instead of hanging. The
 scoreboard's own per-flit checks (right router, type sequence, intact
-destination/route/VC fields) add another 366 checks — see §3.7.
+destination/route/KIND fields) add another 366 checks — see §3.7.
 
 ### 3.7 Where the 477 checks come from
 
 - Printed by `check`/`check_true`: T10a 16, T10b 13, T10c 48, T10d 15,
   credit loop 8, T11 11 → **111**.
 - Added silently on success by `sb_eject`: 129 scored flits × 2 (right router
-  + type sequence) + 36 heads × 3 (dx/dy, route field, VC field) → **366**.
+  + type sequence) + 36 heads × 3 (dx/dy, route field, KIND field) → **366**.
 - 111 + 366 = **477**, with `errors == 0`.
 
 ### 3.8 Assertion coverage
 
-The Makefile compiles every run with `--assert` (mandatory: without it
-Verilator parses `assert property` and silently drops it), so all SVA in
-`rtl/` is live for this run, and none of it fired:
+The Makefile compiles every run with `--assert` (mandatory, since
+without that flag Verilator parses `assert property` and silently drops
+it), so all SVA in `rtl/` is live for this run, and none of it fired:
 
 - **`fifo.sv`** — the two immediate parameter checks (`WIDTH > 0`, `DEPTH` a
   power of two ≥ 2), evaluated at time 0 in every FIFO instance (one per VC per
-  input port: 5 × 2 × 3 = 30 here).
-- **`noc_input_port.sv`** — the static flit-encoding check, and the per-VC
+  input port: 5 × 4 × 3 = 60 here).
+- **`noc_input_port.sv`** — the two immediate parameter assertions (`NUM_VC` is
+  2, 4 or 8; `FLIT_W >= 16`), the static flit-encoding check, and the per-VC
   clocking SVA: grant/request/pick consistency, fetch legality, "FIFO protocol
   violations must be unreachable" (`err`, full-write, empty-read),
   output-VC-assignment integrity, flit-type encoding, out-port legality, the
   `HEAD, BODY*, TAIL` sequence assertion, one-hot `sa_pick` and single-grant.
   The sequence and FIFO families are driven hardest here — by T10c's four-flit
   packet, the 16-flit credit-loop packet and T11's 129 flits.
-- **`arbiter.sv`** — credit bounds, switch-without-credit, credit-return
-  overflow, release/reserve bookkeeping, one-hot pick and grant, grant ⇒
-  pick, zero-credit grant, XY-pair legality, one-hot0 direction codes and VA
-  row accounting. This bench is the most demanding stimulus they get: the
-  section 6 test runs a 16-flit packet at one flit per cycle through the
-  `LOCAL_CREDITS = 4` loop, which is precisely where an off-by-one in the
-  credit count would show up as `credit_count … out of range` or `switched out
+- **`arbiter.sv`** — 15 properties: credit bounds, switch-without-credit,
+  credit-return overflow, release/reserve bookkeeping (a release implies a
+  reservation existed, and a release and a reservation can never land in the
+  same cycle), one-hot pick and grant, grant ⇒ pick, zero-credit grant,
+  XY-pair legality, one-hot0 direction codes on both
+  `sa_req_out_port` and `va_req_out_port`, `va_kept <= 1`, `va_gnt |-> va_req`,
+  and the VC-matched grant property `va_gnt |-> va_gnt_out_vc == VC_W'(gv)` —
+  `va_gnt_out_vc` is an assertion-only internal signal, not a port. This bench
+  is the most demanding stimulus they get: the section 6 test runs a 16-flit
+  packet at one flit per cycle through the `LOCAL_CREDITS = 4` loop, which is
+  precisely where an off-by-one in the credit count would show up as
+  `credit_count … out of range` or `switched out
   with no credit`.
 - **`crossbar.sv`** — selection in range, idle output silent, and "data and
   route_next name the same input port", exercised by T11's concurrent
   two-directional traffic.
-- **`noc_output_port.sv`** — legal lookahead direction, HEAD route actually
-  rewritten by the merge, non-HEAD `[13:10]` preserved, `[3:2]` untouched,
-  merge confined to `[13:10]`, `flit_valid` exactly one cycle behind a grant,
-  and the sideband travelling with its flit. T10a–T10c are written specifically
+- **`noc_output_port.sv`** — 8 properties: legal lookahead direction, HEAD
+  route actually rewritten by the merge, non-head payload preserved, KIND field
+  untouched, everything outside the route field preserved,
+  `st_valid |=> flit_valid`, `!st_valid |=> !flit_valid`, and the `vc_id`
+  sideband travelling with its flit. T10a–T10c are written specifically
   to observe this merge from outside (§2.6).
-- **`router_top.sv`** — the four cross-block seam properties × 5 ports × 3
+- **`router_top.sv`** — 3 immediate parameter assertions per instance
+  (`NUM_VC` is 2, 4 or 8; `FLIT_W >= 16`; `FIFO_DEPTH` a power of two ≥ 2),
+  plus the four cross-block seam properties × 5 ports × 3
   instances = 60 concurrent assertions: grant ⇒ stage-1 pick, grant ⇒
   request, "no credit on a link that does not exist", and "nothing routed to
   an absent port". The two `!HAS_P[p]` properties are the reason this bench

@@ -6,7 +6,7 @@ compares the DUT's flags and read data against that queue after every single
 edge. It is deliberately exhaustive over the small state space a FIFO has —
 *(occupancy, wr, rd)* — rather than sampling it, because a pointer bug that
 only shows up on one specific occupancy will not be caught by a couple of
-directed writes. It produces **953 checks**.
+directed writes. It produces **879 checks**.
 
 ---
 
@@ -25,18 +25,18 @@ FIFO's point of view: `input` means the bench drives it into the DUT,
 | `rst_n` | 1 | input | `reset_dut()` → `dut.rst_n` | Active-low **synchronous** reset; held low for four full periods, then released. The bench also zeroes its own model when it releases. |
 | `wr_enable` | 1 | input | `drive_write()` / `drive_read_write()` → `dut.wr_enable` | Driven high on a negedge and dropped on the next negedge, so it spans exactly one posedge. |
 | `rd_enable` | 1 | input | `drive_read()` / `drive_read_write()` → `dut.rd_enable` | Same one-cycle-at-a-time cadence; high together with `wr_enable` for the simultaneous cases. |
-| `data_in` | `WIDTH` (32) | input | driver tasks → `dut.data_in` | Payload for the write half of a transaction: `$urandom` in most tests, `0..DEPTH-1` when `test_full_read_write` fills the queue so the model's expected pop is a known value, and `32'hDEAD_BEEF` for the write that is supposed to be rejected. |
-| `data_out` | `WIDTH` (32) | output | `dut.data_out` → `drive_read()` / `drive_read_write()` checks | Sampled 1 ns *after* the posedge; compared to the queue's `pop_front()` value, or to its own previous value on a rejected read. |
+| `data_in` | `WIDTH` (40) | input | driver tasks → `dut.data_in` | Payload for the write half of a transaction: `$urandom` in most tests, `0..FIFO_DEPTH-1` when `test_full_read_write` fills the queue so the model's expected pop is a known value, and `32'hDEAD_BEEF` for the write that is supposed to be rejected. |
+| `data_out` | `WIDTH` (40) | output | `dut.data_out` → `drive_read()` / `drive_read_write()` checks | Sampled 1 ns *after* the posedge; compared to the queue's `pop_front()` value, or to its own previous value on a rejected read. |
 | `empty` | 1 | output | `dut.empty` → driver / test-level checks | Sampled after every edge and compared to `ref_model.size() == 0`; also asserted directly by `test_reset` and `test_empty`. |
-| `full` | 1 | output | `dut.full` → driver / test-level checks | Compared to `ref_model.size() == DEPTH` after every edge; `test_full` and `test_protocol_violation` assert it explicitly. |
+| `full` | 1 | output | `dut.full` → driver / test-level checks | Compared to `ref_model.size() == FIFO_DEPTH` after every edge; `test_full` and `test_protocol_violation` assert it explicitly. |
 | `err` | 1 | output | `dut.err` → driver checks | **Combinational**, so it is sampled *before* the edge (after a `#0` settle at the negedge) against the error the model predicts for this cycle's enables. |
 
 ### 1.2 Parameters, variables and state
 
 | Name | Width | Kind | Reset | Working / description |
 |---|---|---|---|---|
-| `WIDTH` | 32 | `localparam int` | — | Element width; passed to the DUT as `.WIDTH(WIDTH)` so bench and DUT can never disagree. |
-| `DEPTH` | 8 | `localparam int` | — | Queue depth; passed as `.DEPTH(DEPTH)`. It is also the loop bound for every fill/drain loop and the occupancy value every `full` check compares against. |
+| `WIDTH` | 40 | `localparam int` | — | Element width: one flit, the width the rest of the design runs at (`linnea_v2` section 1). Passed to the DUT as `.WIDTH(WIDTH)` so bench and DUT can never disagree. |
+| `FIFO_DEPTH` | 4 | `parameter int` | — | Queue depth; passed as `.DEPTH(FIFO_DEPTH)`. It is also the loop bound for every fill/drain loop and the occupancy value every `full` check compares against. Declared `parameter` (not `localparam`) under the suite-wide knob name `FIFO_DEPTH`, so a `-GFIFO_DEPTH=` override reaches this bench too. |
 | `CLK_PERIOD` | 10 ns | `localparam realtime` | — | Clock period; `CLK_PERIOD/2` is the toggle delay, and reset length is `4 * CLK_PERIOD`. |
 | `clk` | 1 | `logic` (bench-driven) | `0` at time 0 | `initial clk = 0;` plus `always #(CLK_PERIOD/2) clk = ~clk;`. |
 | `rst_n` | 1 | `logic` (bench-driven) | 0 while in reset | Written only by `reset_dut()`. |
@@ -57,7 +57,7 @@ correct.
 
 ## 2. RTL explanation
 
-### 2.1 Clock and reset (lines 41–58)
+### 2.1 Clock and reset (lines 43–60)
 
 The clock is the universal idiom — `initial clk = 0;` followed by
 `always #(CLK_PERIOD / 2) clk = ~clk;` — giving a 10 ns period with edges on
@@ -95,7 +95,7 @@ updates are still in flight. Step 4 guarantees the enable was high across
 exactly one posedge, so "one call = one transaction" and consecutive calls
 tile back-to-back with no idle cycle between them.
 
-### 2.3 The check task (lines 81–89)
+### 2.3 The check task (lines 83–91)
 
 ```systemverilog
 task automatic check(string name, bit cond);
@@ -115,13 +115,23 @@ the human-readable case name (the names double as the per-test breakdown in
 running so the log shows how far the corruption propagated — and the final
 banner is decided purely by `errors`.
 
-### 2.4 The reference model and the three driver tasks (lines 107–303)
+The bench deliberately does **not** import `noc_tb_pkg`. That package owns a
+shared `checks`/`errors` pair and a `check()` that compares two `FLIT_W`-wide
+values and prints them as hex — a reporter shaped for flits, where a test
+hands it an actual and an expected word. This bench has the other shape: a
+narrow `(name, bit)` predicate evaluated at the call site, with the comparison
+already done by the caller, so it keeps its own counters and its own task.
+Importing the package while declaring a local `check` would hide the imported
+name outright (Verilator reports `VARHIDDEN`), so the split is a decision
+rather than an oversight — the same reasoning the package's own header gives.
+
+### 2.4 The reference model and the three driver tasks (lines 109–305)
 
 `ref_model` is a SystemVerilog queue acting as a golden copy of the FIFO
 contents. All expected values derive from it, which is why the drivers are
 careful about *when* they read it:
 
-- **`drive_write(data)`** — captures `was_full = (ref_model.size() == DEPTH)`
+- **`drive_write(data)`** — captures `was_full = (ref_model.size() == FIFO_DEPTH)`
   *before* the edge, derives `exp_err = was_full`, checks `err` pre-edge, then
   after the edge pushes the data only `if (!was_full)` and checks `empty` and
   `full` against the new size. A write while full therefore both raises `err`
@@ -146,7 +156,7 @@ careful about *when* they read it:
 The model never guesses: it applies the DUT's documented acceptance rules to
 its own state, then demands the DUT agree.
 
-### 2.5 Test sequencing, report and waveform (lines 495–529)
+### 2.5 Test sequencing, report and waveform (lines 497–531)
 
 The main `initial` block runs the ten tests of §3.1 in a fixed order, each of
 which begins with its own `reset_dut()`. It then prints a separator, the two
@@ -165,7 +175,7 @@ clock never stops.
 **Run:** `make TOP=fifo sim` — final report:
 
 ```
-Checks : 953
+Checks : 879
 Errors : 0
 ALL TESTS PASSED
 ```
@@ -175,16 +185,16 @@ ALL TESTS PASSED
 | # | Test (banner) | Property it targets | Checks |
 |---|---|---|---|
 | 1 | `test_reset` | Idle state out of reset: `empty==1`, `full==0`, `err==0`. | 3 |
-| 2 | `test_write_only` | Eight consecutive random writes accepted; `err` low, `empty` dropping, `full` rising exactly at occupancy 8. | 24 |
-| 3 | `test_read_only` | Fill then drain: every read returns the oldest element (FIFO order) and the flags track the model down to empty. | 56 |
-| 4 | `test_full` | The explicit `full` corner — after `DEPTH` writes `full==1` and `empty==0`. | 26 |
+| 2 | `test_write_only` | Four consecutive random writes accepted; `err` low, `empty` dropping, `full` rising exactly at occupancy 4 (`FIFO_DEPTH`). | 12 |
+| 3 | `test_read_only` | Fill then drain: every read returns the oldest element (FIFO order) and the flags track the model down to empty. | 28 |
+| 4 | `test_full` | The explicit `full` corner — after `FIFO_DEPTH` writes `full==1` and `empty==0`. | 14 |
 | 5 | `test_empty` | The explicit read-while-empty violation: `err==1`, `empty` still set, `full` still clear. | 7 |
 | 6 | `test_simultaneous_read_write` | Normal-occupancy R/W: both operations succeed, occupancy unchanged, `err==0`, five times from occupancy 2. | 26 |
 | 7 | `test_empty_bypass` | R/W on an empty FIFO: `data_out == data_in` on the next edge **and** the model stays empty (nothing was stored). | 5 |
-| 8 | `test_full_read_write` | R/W while full — read accepted, `32'hDEAD_BEEF` write rejected, `err==1`, `full` drops, occupancy falls to `DEPTH-1`. | 31 |
-| 9 | `test_protocol_violation` | The ninth write into a full FIFO: rejected, `full` stays high, occupancy pinned at `DEPTH`. | 29 |
-| 10 | `test_random(200)` | Soak: 200 transactions drawn uniformly from `{write, read, read+write}` (`$urandom_range(0,2)`), every one checked against the queue. Random data (`$urandom`) makes ordering bugs visible in `data_out`. | 746 |
-| | | **Total** | **953** |
+| 8 | `test_full_read_write` | R/W while full — read accepted, `32'hDEAD_BEEF` write rejected, `err==1`, `full` drops, occupancy falls to `FIFO_DEPTH-1`. | 19 |
+| 9 | `test_protocol_violation` | The fifth write into a full FIFO: rejected, `full` stays high, occupancy pinned at `FIFO_DEPTH`. | 17 |
+| 10 | `test_random(200)` | Soak: 200 transactions drawn uniformly from `{write, read, read+write}` (`$urandom_range(0,2)`), every one checked against the queue. Random data (`$urandom`) makes ordering bugs visible in `data_out`. | 748 |
+| | | **Total** | **879** |
 
 Together the directed tests pin down every row of the *(occupancy, wr, rd)*
 truth table — including the two corner combinations where one enable is legal
@@ -207,11 +217,13 @@ scored.
 `rtl/fifo.sv` contains **no clocking SVA** — its only assertions are the two
 time-0 parameter checks (`WIDTH > 0`, `DEPTH` a power of two ≥ 2). Those run
 in this build because the Makefile compiles every bench with `--assert`, and
-they are proven to *fire* by `tools/assert_neg.sh` case 1, which widens the
-bound to 9 so the default `DEPTH = 8` becomes illegal and requires:
+they are proven to *fire* by `tools/assert_neg.sh` case 1, which rewrites the
+bound from `DEPTH >= 2` to `DEPTH >= 9`, so the depth this build is configured
+with — 4 — no longer satisfies it and `$fatal`s at time 0, before a single
+cycle runs:
 
 ```
-%Fatal: fifo.sv:62: Assertion failed ... fifo: DEPTH must be a power of two >= 2, got 8
+%Fatal: fifo.sv:67: Assertion failed ... fifo: DEPTH must be a power of two >= 2, got 4
 ```
 
 So for this module the bench is the checker: `err`, occupancy and data order
@@ -224,5 +236,5 @@ assertion — see `docs/tb/tb_noc_input_port.md` §3.3.)
 `tools/mutate_all.sh` deliberately does not target this file: it builds
 without `--assert` against `tb_router_top`, where a FIFO mutation would be
 caught by a higher-level bench anyway, and the parameter check would be lost
-in that configuration. The FIFO's own mutation coverage is this bench's 953
+in that configuration. The FIFO's own mutation coverage is this bench's 879
 checks.

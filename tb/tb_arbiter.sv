@@ -9,10 +9,11 @@
 //
 //   R0   reset state: credit counters at their init values, no reservations,
 //        no spurious grants
-//   T6   VA contention: three requesters, two output VCs, HEAD_TAIL beats
-//        HEAD. Also proves that a row reserved by VA blocks further
-//        grants, that a column-dropped row reserves nothing, and that a
-//        dropped row does not advance its round-robin pointer.
+//   T6   VA contention: three requesters on VC0, HEAD_TAIL beats HEAD.
+//        Also proves that a row reserved by VA blocks further grants, that
+//        a VC0 requester cannot reach a free row on any other VC (the
+//        VC-matched rule of linnea_v2 section 4.4), and that each row is
+//        drained only by a requester on that row's own VC index.
 //   T4   two VCs on one input port pointing at different outputs: stage 1
 //        collapses them to a single candidate, so the input can never
 //        receive two grants in a cycle. Covers the stage-1 rotation and
@@ -22,7 +23,7 @@
 //        value, with the exact granted VC pinned per cycle.
 //   T7   credit exhaustion, recovery from zero, and the same-cycle +1/-1
 //        case. Uses the SOUTH output, which no earlier test touches, so it
-//        starts from a known full count of DIR_CREDITS.
+//        starts from a known full count of FIFO_DEPTH.
 //
 // Plus continuous SVA for the section 8 properties that hold every cycle
 // regardless of which directed test is running: a grant implies a request,
@@ -41,11 +42,20 @@
 
 module tb_arbiter;
 
+  // Flit field model and the shared reporter (see noc_tb_pkg.sv).
+  import noc_tb_pkg::*;
+
   // ---- configuration under test (section 2) ----
+  // FLIT_W is owned by noc_tb_pkg, not redeclared here -- this bench carries
+  // no payload, so it only ever appears as the shared checker's argument
+  // width, and one definition of it means the same thing everywhere.
   localparam int NUM_PORTS     = 5;
-  localparam int NUM_VC        = 2;
+  parameter  int NUM_VC        = 4;
+  // VC index width (linnea_v2 section 1): derived rather than independent,
+  // so a sideband can never be narrower than the index it carries.
+  localparam int VC_W          = (NUM_VC > 1) ? $clog2(NUM_VC) : 1;
   localparam int LOCAL_IDX     = 0;
-  localparam int DIR_CREDITS   = 8;   // = noc_input_port's FIFO depth
+  parameter  int FIFO_DEPTH   = 4;   // = noc_input_port FIFO depth
   localparam int LOCAL_CREDITS = 4;   // = NI receive buffer depth
 
   localparam int P_LOCAL  = 0;
@@ -81,18 +91,17 @@ module tb_arbiter;
   logic [NUM_PORTS-1:0][NUM_VC-1:0][3:0] va_req_out_port;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]      va_req_single;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]      va_gnt;
-  logic [NUM_PORTS-1:0][NUM_VC-1:0][1:0] va_gnt_out_vc;
 
   logic [NUM_PORTS-1:0][NUM_VC-1:0]      sa_req;
   logic [NUM_PORTS-1:0][NUM_VC-1:0][3:0] sa_req_out_port;
-  logic [NUM_PORTS-1:0][NUM_VC-1:0][1:0] sa_req_out_vc;
+  logic [NUM_PORTS-1:0][NUM_VC-1:0][VC_W-1:0] sa_req_out_vc;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]      sa_req_last;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]      sa_gnt;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]      sa_pick;
 
   logic [NUM_PORTS-1:0][2:0] xbar_sel;
   logic [NUM_PORTS-1:0]      st_valid;
-  logic [NUM_PORTS-1:0][1:0] st_out_vc;
+  logic [NUM_PORTS-1:0][VC_W-1:0] st_out_vc;
 
   logic [NUM_PORTS-1:0][NUM_VC-1:0] ds_credit_valid;
 
@@ -100,7 +109,7 @@ module tb_arbiter;
       .NUM_PORTS    (NUM_PORTS),
       .NUM_VC       (NUM_VC),
       .LOCAL_IDX    (LOCAL_IDX),
-      .DIR_CREDITS  (DIR_CREDITS),
+      .DIR_CREDITS  (FIFO_DEPTH),
       .LOCAL_CREDITS(LOCAL_CREDITS)
   ) u_arb (
       .clk              (clk),
@@ -110,7 +119,6 @@ module tb_arbiter;
       .va_req_out_port  (va_req_out_port),
       .va_req_single    (va_req_single),
       .va_gnt           (va_gnt),
-      .va_gnt_out_vc    (va_gnt_out_vc),
 
       .sa_req           (sa_req),
       .sa_req_out_port  (sa_req_out_port),
@@ -127,29 +135,24 @@ module tb_arbiter;
   );
 
   // =========================================================================
-  // Bookkeeping
+  // Bookkeeping -- checks, errors and check() all come from noc_tb_pkg
   // =========================================================================
-
-  int errors = 0;
-  int checks = 0;
-
-  task automatic check(input string what, input logic [31:0] actual,
-                       input logic [31:0] expected);
-    checks++;
-    if (actual !== expected) begin
-      errors++;
-      $display("FAIL: %-46s got=%0d (0x%0h)  exp=%0d (0x%0h)",
-               what, actual, actual, expected, expected);
-    end else begin
-      $display("PASS: %-46s %0d", what, actual);
-    end
-  endtask
 
   // Which input port, if any, holds a grant this cycle. -1 for none.
   function automatic int gnt_port();
     gnt_port = -1;
     for (int p = 0; p < NUM_PORTS; p++)
       if (|sa_gnt[p] && (gnt_port == -1)) gnt_port = p;
+  endfunction
+
+  // One-hot expectation for `va_gnt`, for the VA requester (input port p,
+  // input VC v). va_gnt is packed as [NUM_PORTS-1:0][NUM_VC-1:0], so the
+  // bit position is p*NUM_VC+v -- the same flattening the arbiter uses for
+  // its round-robin pointers. Deriving it here rather than writing a literal
+  // is what lets these checks hold for any NUM_VC instead of only for the
+  // two the test was first written against.
+  function automatic logic [FLIT_W-1:0] gmask(input int p, input int v);
+    return FLIT_W'(1) << (p * NUM_VC + v);
   endfunction
 
   function automatic logic [2:0] pidx(input logic [3:0] dir);
@@ -259,22 +262,30 @@ module tb_arbiter;
     // =================== R0: reset state ===================
     $display("---- R0  reset state ----");
 
-    check("R0 credit_count[EAST][0]  = DIR_CREDITS", u_arb.credit_count[P_EAST][0],
-          DIR_CREDITS);
+    check("R0 credit_count[EAST][0]  = FIFO_DEPTH", u_arb.credit_count[P_EAST][0],
+          FIFO_DEPTH);
     check("R0 credit_count[LOCAL][0] = LOCAL_CREDITS", u_arb.credit_count[P_LOCAL][0],
           LOCAL_CREDITS);
-    check("R0 credit_count[SOUTH][1] = DIR_CREDITS", u_arb.credit_count[P_SOUTH][1],
-          DIR_CREDITS);
+    check("R0 credit_count[SOUTH][1] = FIFO_DEPTH", u_arb.credit_count[P_SOUTH][1],
+          FIFO_DEPTH);
     check("R0 alloc_busy[LOCAL][0] clear", u_arb.alloc_busy[P_LOCAL][0], 1'b0);
     check("R0 no VA grants", va_gnt, '0);
     check("R0 no SA grants", sa_gnt, '0);
     check("R0 no switch valid", st_valid, '0);
 
     // =================== T6: VA contention ===================
-    // Three requesters (N, E, W -- all legally able to reach LOCAL) against
-    // two LOCAL output VCs. Port 2's packet is HEAD_TAIL, so it sits in the
-    // single tier and must win over the two HEADs.
-    $display("---- T6  VA contention: three requesters, two VCs, HEAD_TAIL wins ----");
+    // Three requesters (N, E, W -- all legally able to reach LOCAL) on VC0.
+    // Port EAST's packet is HEAD_TAIL, so it sits in the single tier and
+    // must win over the two HEADs.
+    //
+    // What this test means changed with linnea_v2 section 4.4. A row is not
+    // a free slot any requester can be handed: it is indexed by an output VC,
+    // and only ports asking at that same VC index are candidates. A VC0
+    // requester therefore owns output VC0 and nothing else, which is why the
+    // drain below raises a fresh requester per VC instead of letting the
+    // VC0 winner walk down the rows the way the old separable allocator let
+    // it -- and the reason there is no dropped-row behaviour left to test.
+    $display("---- T6  VA contention: three requesters, HEAD_TAIL wins its own LOCAL row ----");
 
     va_req[P_NORTH][0] = 1'b1;
     va_req_out_port[P_NORTH][0] = DIR_LOCAL;
@@ -289,38 +300,66 @@ module tb_arbiter;
     va_req_single[P_WEST][0]   = 1'b0;    // HEAD
     settle();
 
-    // Only requester id 4 (port 2, VC 0) may win, and only the lowest row:
-    // it won both rows, so the column stage keeps k=0 and drops k=1.
-    check("T6 c1 grant mask (port2 VC0 only)", va_gnt, 32'd16);
-    check("T6 c1 granted output VC", va_gnt_out_vc[P_EAST][0], 0);
-    check("T6 c1 other requesters silent", va_gnt & ~32'h10, '0);
+    // Only (EAST, VC0) may win, and only row (LOCAL, 0) -- the row its own
+    // index names. The tiering itself is unchanged from the separable form.
+    check("T6 c1 grant mask (port EAST VC0 only)", va_gnt, gmask(P_EAST, 0));
+    check("T6 c1 output VC is the requester's own", u_arb.va_gnt_out_vc[P_EAST][0], 0);
+    check("T6 c1 other requesters silent", va_gnt & ~gmask(P_EAST, 0), '0);
     next_cycle();
     settle();
 
-    // The row it took is now reserved; the dropped row is not. alloc_busy
+    // The row it took is now reserved; the rest are still free. alloc_busy
     // is read here, after the posedge that set it.
     check("T6 c2 alloc_busy[LOCAL][0] set by the grant", u_arb.alloc_busy[P_LOCAL][0], 1'b1);
-    check("T6 c2 alloc_busy[LOCAL][1] clear (row was dropped)",
-          u_arb.alloc_busy[P_LOCAL][1], 1'b0);
+    check("T6 c2 alloc_busy[LOCAL][1] free", u_arb.alloc_busy[P_LOCAL][1], 1'b0);
 
-    // Row 0 is reserved, so only row 1 is available -- same single-tier
-    // winner, now handed the other VC.
-    check("T6 c2 grant mask (same requester)", va_gnt, 32'd16);
-    check("T6 c2 granted output VC", va_gnt_out_vc[P_EAST][0], 1);
+    // The VC-matched half, stated as a negative. Rows 1.. are free and all
+    // three are still asking -- but they are asking on VC0, and VC0's row is
+    // the one that is taken, so nothing at all may be granted. The old
+    // separable allocator handed one of them row 1 here and reserved it;
+    // that cross-VC ownership is exactly what section 4.4 forbids.
+    check("T6 c3 free rows unreachable from VC0", va_gnt, '0);
     next_cycle();
     settle();
 
-    check("T6 c3 alloc_busy[LOCAL][1] now set", u_arb.alloc_busy[P_LOCAL][1], 1'b1);
-    // Both rows reserved: nobody else can be granted anything this cycle,
-    // even though all three requesters are still asking.
-    check("T6 c3 all rows reserved -> no grant", va_gnt, '0);
+    // Drain the remaining rows one VC at a time. Each row needs its OWN
+    // requester, because a row's candidates are the ports asking at that
+    // same VC index. The loop bound is NUM_VC, so this holds for two output
+    // VCs and for eight.
+    for (int k = 1; k < NUM_VC; k++) begin
+      va_req[P_EAST][k] = 1'b1;
+      va_req_out_port[P_EAST][k] = DIR_LOCAL;
+      va_req_single[P_EAST][k]   = 1'b1;
+      settle();
+
+      // gmask(P_EAST, k) is a single bit, so an exact match proves neither a
+      // neighbouring VC of EAST nor any other port was granted alongside it.
+      check($sformatf("T6 row %0d grant mask (its own requester only)", k),
+            va_gnt, gmask(P_EAST, k));
+
+      // Expected value passed as the bare int, NOT as VC_W'(k): that cast
+      // keeps k's signedness, so a 2-bit k of 10 becomes -2 and sign-extends
+      // to the checker's 40-bit argument. k here is small and non-negative,
+      // so widening it directly is the width-correct spelling.
+      check($sformatf("T6 row %0d output VC == input VC", k),
+            u_arb.va_gnt_out_vc[P_EAST][k], k);
+
+      next_cycle();
+      settle();
+      check($sformatf("T6 row %0d alloc_busy[LOCAL][%0d] set", k, k),
+            u_arb.alloc_busy[P_LOCAL][k], 1'b1);
+      if (k + 1 < NUM_VC)
+        check($sformatf("T6 row %0d next row still free", k),
+              u_arb.alloc_busy[P_LOCAL][k + 1], 1'b0);
+    end
+
+    // Every row reserved: nobody can be granted anything this cycle, even
+    // though every requester raised above is still asking.
+    check("T6 c4 all rows reserved -> no grant", va_gnt, '0);
     next_cycle();
     settle();
 
-    // A dropped row must not have advanced its pointer: row 1 re-picks the
-    // same requester it picked the first time (which is why T6 c2 still
-    // chose port 2 rather than rotating to a HEAD).
-    check("T6 c4 still no grant while rows reserved", va_gnt, '0);
+    check("T6 c5 still no grant while rows reserved", va_gnt, '0);
 
     // release the stimulus
     va_req = '0;
@@ -335,12 +374,12 @@ module tb_arbiter;
     // LOCAL VC0 -> EAST, LOCAL VC1 -> WEST. Both are XY-legal from LOCAL.
     sa_req[P_LOCAL][0] = 1'b1;
     sa_req_out_port[P_LOCAL][0] = DIR_EAST;
-    sa_req_out_vc[P_LOCAL][0]   = 2'd0;
+    sa_req_out_vc[P_LOCAL][0]   = VC_W'(0);
     sa_req_last[P_LOCAL][0]     = 1'b0;
 
     sa_req[P_LOCAL][1] = 1'b1;
     sa_req_out_port[P_LOCAL][1] = DIR_WEST;
-    sa_req_out_vc[P_LOCAL][1]   = 2'd0;
+    sa_req_out_vc[P_LOCAL][1]   = VC_W'(0);
     sa_req_last[P_LOCAL][1]     = 1'b0;
     settle();
 
@@ -388,17 +427,17 @@ module tb_arbiter;
     // Ports NORTH and EAST each offer BOTH of their VCs into LOCAL.
     sa_req[P_NORTH][0] = 1'b1;
     sa_req_out_port[P_NORTH][0] = DIR_LOCAL;
-    sa_req_out_vc[P_NORTH][0]   = 2'd0;
+    sa_req_out_vc[P_NORTH][0]   = VC_W'(0);
     sa_req[P_NORTH][1] = 1'b1;
     sa_req_out_port[P_NORTH][1] = DIR_LOCAL;
-    sa_req_out_vc[P_NORTH][1]   = 2'd1;
+    sa_req_out_vc[P_NORTH][1]   = VC_W'(1);
 
     sa_req[P_EAST][0] = 1'b1;
     sa_req_out_port[P_EAST][0] = DIR_LOCAL;
-    sa_req_out_vc[P_EAST][0]   = 2'd0;
+    sa_req_out_vc[P_EAST][0]   = VC_W'(0);
     sa_req[P_EAST][1] = 1'b1;
     sa_req_out_port[P_EAST][1] = DIR_LOCAL;
-    sa_req_out_vc[P_EAST][1]   = 2'd1;
+    sa_req_out_vc[P_EAST][1]   = VC_W'(1);
     settle();
 
     // Stage-2 fairness is the property under test, so it is checked as a
@@ -418,13 +457,13 @@ module tb_arbiter;
     begin : t5_seq
       int expect_port [4];
       logic [1:0] expect_mask [4];  // one-hot sa_gnt value for that port
-      logic [1:0] expect_svc  [4];  // downstream VC index on the sideband
+      logic [VC_W-1:0] expect_svc  [4];  // downstream VC index on the sideband
       int got_port;
 
-      expect_port[0] = P_NORTH; expect_mask[0] = 2'b01; expect_svc[0] = 2'd0;
-      expect_port[1] = P_EAST;  expect_mask[1] = 2'b01; expect_svc[1] = 2'd0;
-      expect_port[2] = P_NORTH; expect_mask[2] = 2'b10; expect_svc[2] = 2'd1;
-      expect_port[3] = P_EAST;  expect_mask[3] = 2'b10; expect_svc[3] = 2'd1;
+      expect_port[0] = P_NORTH; expect_mask[0] = 2'b01; expect_svc[0] = VC_W'(0);
+      expect_port[1] = P_EAST;  expect_mask[1] = 2'b01; expect_svc[1] = VC_W'(0);
+      expect_port[2] = P_NORTH; expect_mask[2] = 2'b10; expect_svc[2] = VC_W'(1);
+      expect_port[3] = P_EAST;  expect_mask[3] = 2'b10; expect_svc[3] = VC_W'(1);
 
       for (int c = 0; c < 4; c++) begin
         if (c > 0) begin
@@ -459,15 +498,15 @@ module tb_arbiter;
 
     // =================== T7: credits ===================
     // SOUTH has not been used by any earlier test, so it starts at a full
-    // DIR_CREDITS and the arithmetic below is independent of what the rest
+    // FIFO_DEPTH and the arithmetic below is independent of what the rest
     // of the bench has done.
     $display("---- T7  credit exhaustion, recovery, same-cycle +1/-1 ----");
 
-    check("T7 SOUTH starts full", u_arb.credit_count[P_SOUTH][0], DIR_CREDITS);
+    check("T7 SOUTH starts full", u_arb.credit_count[P_SOUTH][0], FIFO_DEPTH);
 
     sa_req[P_NORTH][0] = 1'b1;
     sa_req_out_port[P_NORTH][0] = DIR_SOUTH;
-    sa_req_out_vc[P_NORTH][0]   = 2'd0;
+    sa_req_out_vc[P_NORTH][0]   = VC_W'(0);
     sa_req_last[P_NORTH][0]     = 1'b0;
     settle();
 
@@ -479,10 +518,10 @@ module tb_arbiter;
     // apart is the whole trick here: reading a counter after settle() shows
     // it one decrement behind the grant next to it, which is an off-by-one
     // in the bench, not in the RTL.
-    for (int c = 0; c < DIR_CREDITS; c++) begin
+    for (int c = 0; c < FIFO_DEPTH; c++) begin
       if (c > 0) next_cycle();
       check($sformatf("T7 drain c%0d credits before this grant", c + 1),
-            u_arb.credit_count[P_SOUTH][0], DIR_CREDITS - c);
+            u_arb.credit_count[P_SOUTH][0], FIFO_DEPTH - c);
       settle();
       check($sformatf("T7 drain c%0d grant with credit left", c + 1),
             $countones(sa_gnt), 1);

@@ -17,7 +17,7 @@ PY
   rm -rf obj_dir/v_mut
   if ! verilator --binary --timing --trace -Wall -Wno-BLKSEQ -Wno-WIDTHEXPAND \
        -Wno-UNUSEDSIGNAL -sv --top-module tb_router_top -Mdir obj_dir/v_mut -o run \
-       rtl/*.sv tb/tb_router_top.sv > /tmp/opencode/mut.build 2>&1; then
+       rtl/*.sv tb/noc_tb_pkg.sv tb/tb_router_top.sv > /tmp/opencode/mut.build 2>&1; then
     echo "ERROR $name (build failed)"; tail -4 /tmp/opencode/mut.build
     cp /tmp/opencode/mut.bak "$file"; return
   fi

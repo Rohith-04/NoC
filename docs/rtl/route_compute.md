@@ -219,6 +219,6 @@ compute_dir = (tgt_x > cur_x) ? DIR_EAST : DIR_WEST;   ->   ... DIR_WEST : DIR_E
 ```
 
 The mutation suite builds `tb_router_top`, so the kill is reported there:
-**17/107 CHECKS FAILED**. A wrong direction sends packets off the mesh and
+**13/103 CHECKS FAILED**. A wrong direction sends packets off the mesh and
 they either never arrive or arrive at the wrong router, and every downstream
 check that assumed a route fails with them.

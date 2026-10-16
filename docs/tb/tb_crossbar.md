@@ -31,11 +31,11 @@ ports of its own, so this table is the whole interface presented to the single
 |---|---|---|---|---|
 | `clk` | 1 | input | bench clock generator → DUT assertions only | No datapath logic in `crossbar` reads it; it exists so the three `assert property` families have an event to sample on, and it costs nothing on an unused combinational block. |
 | `rst_n` | 1 | input | `reset_dut()` → `disable iff (!rst_n)` on every assertion | Active-low synchronous reset, held low for four posedges and released on a negedge. It gates the assertions; the mux has no state to reset. |
-| `xbar_in_data` | `[NUM_PORTS-1:0][31:0]` (5×32) | input | bench stimulus → payload mux | One 32-bit flit per input port, post-VC-mux. Each port is driven with its own `pat(p)` word, different in every field of the word (§2.4). |
+| `xbar_in_data` | `[NUM_PORTS-1:0][FLIT_W-1:0]` (5×40) | input | bench stimulus → payload mux | One `FLIT_W`-wide (40-bit) flit per input port, post-VC-mux. Each port is driven with its own `pat(p)` word, different in every named field of the word (§2.4). |
 | `xbar_in_route_next` | `[NUM_PORTS-1:0][3:0]` (5×4) | input | bench stimulus → route mux | The per-port lookahead direction, driven as `DIR[p]` so every port carries a *different* legal direction code. |
 | `xbar_sel` | `[NUM_PORTS-1:0][2:0]` (5×3) | input | bench stimulus (standing in for SA stage 2) → both muxes | Which input port each output reads. 3 bits wide because it counts ports `0..4`; the bench only ever drives in-range values `0..4`. |
 | `st_valid` | `[NUM_PORTS-1:0]` (5) | input | bench stimulus (standing in for SA stage 2) → the zero-when-idle gate | Per-output "carries a flit this cycle". Everything the zero rule does is a function of this bit alone. |
-| `xbar_out_data` | `[NUM_PORTS-1:0][31:0]` (5×32) | output | crossbar payload mux → bench (in the router: `noc_output_port`'s link register) | Combinational; zero whenever `st_valid[o]` is low, otherwise `xbar_in_data[xbar_sel[o]]`. |
+| `xbar_out_data` | `[NUM_PORTS-1:0][FLIT_W-1:0]` (5×40) | output | crossbar payload mux → bench (in the router: `noc_output_port`'s link register) | Combinational; zero whenever `st_valid[o]` is low, otherwise `xbar_in_data[xbar_sel[o]]`. |
 | `xbar_out_route_next` | `[NUM_PORTS-1:0][3:0]` (5×4) | output | crossbar route mux → bench (in the router: the header merge) | The same selection as the payload, gated identically — the "same input port" property under test. |
 
 No signal is read hierarchically: the bench compares only against values it
@@ -46,22 +46,23 @@ drove itself.
 | Name | Width | Kind | Reset | Working / description |
 |---|---|---|---|---|
 | `NUM_PORTS` | int | `localparam` | n/a | `5` — the fixed 5×5 configuration, also passed to the DUT as a parameter. |
+| `FLIT_W` | int | imported (`noc_tb_pkg`) | n/a | `40` — the one definition of the flit width. The bench does not redeclare it, and the DUT's own `FLIT_W` parameter defaults to the same number, so `xbar_in_data` and the port it feeds are provably the same width. |
 | `CLK_PERIOD` | realtime | `localparam` | n/a | `10ns`, halved to get the 5 ns clock phase. |
 | `DIR` | 5 × 4 | `localparam` (unpacked array of `logic [3:0]`) | n/a | `'{4'b0000, 4'b0001, 4'b0010, 4'b0100, 4'b1000}` — the five legal direction codes indexed by input port. Used both to drive `xbar_in_route_next[p]` and, in the design, to name ports; keeping it here means a route expectation is a `DIR[...]` read rather than a magic literal. |
 | `clk` | 1 | `variable` | initial `0` (`initial clk = 0`) | Toggled every `CLK_PERIOD/2`. |
 | `rst_n` | 1 | `variable` | set `0` by `reset_dut()` before the first edge | Released on a negedge after four posedges. |
-| `checks` | 32 (int) | `variable` | `0` at declaration | Incremented by every `check`; the number in the final report. |
-| `errors` | 32 (int) | `variable` | `0` at declaration | Incremented on a mismatch; `0` ⇒ `ALL 286 CHECKS PASSED`. |
-| `xbar_in_data` | 5×32 | array (packed) | cleared by `reset_dut()` | Stimulus state: rewritten by `drive_inputs()` in every test (and patched per-port in T5). |
+| `checks` | 32 (int) | imported (`noc_tb_pkg`) | `0` at declaration, in the package | Incremented by every `check`; the number in the final report. |
+| `errors` | 32 (int) | imported (`noc_tb_pkg`) | `0` at declaration, in the package | Incremented on a mismatch; `0` ⇒ `ALL 286 CHECKS PASSED`. |
+| `xbar_in_data` | 5×40 | array (packed) | cleared by `reset_dut()` | Stimulus state: rewritten by `drive_inputs()` in every test (and patched per-port in T5). |
 | `xbar_in_route_next` | 5×4 | array (packed) | cleared by `reset_dut()` | Stimulus state: `DIR[p]` per port, patched in T5. |
 | `xbar_sel` | 5×3 | array (packed) | cleared by `reset_dut()` | Stimulus state: the selection under test. |
 | `st_valid` | 5 | array (packed) | cleared by `reset_dut()` | Stimulus state: the validity mask under test. |
-| `xbar_out_data` | 5×32 | array (packed) | driven by DUT | Response wire, compared after every `tick()`. |
+| `xbar_out_data` | 5×40 | array (packed) | driven by DUT | Response wire, compared after every `tick()`. |
 | `xbar_out_route_next` | 5×4 | array (packed) | driven by DUT | Response wire. |
-| `check(what, actual, expected)` | — | `task automatic` | n/a | The single pass/fail recorder (§2.3). |
+| `check(what, actual, expected)` | — | imported task (`noc_tb_pkg`) | n/a | The single pass/fail recorder (§2.3). |
 | `tick()` | — | `task automatic` | n/a | `@(negedge clk); #1;` — the timing primitive: advances one cycle and lands stimulus a half-period clear of the sampling posedge (§2.2). |
 | `reset_dut()` | — | `task automatic` | n/a | Parks every input at zero, holds `rst_n` low four posedges, releases on a negedge, `#1` (§2.1). |
-| `pat(p)` | 32 | `function automatic` | n/a | The stimulus generator: a payload that differs in *every* region of the word between ports (§2.4). |
+| `pat(p)` | `FLIT_W` | `function automatic` | n/a | The stimulus generator: a payload that differs in *every* named region of the word between ports, built from the package's setters rather than by slice (§2.4). |
 | `drive_inputs()` | — | `task automatic` | n/a | Loads `pat(p)` and `DIR[p]` into all five inputs at once. |
 | `other` | 32 (int) | `variable` (local to `t1_idle_zero`) | n/a | Folds "was any input word non-zero?" so T1's zero checks cannot be vacuously true. |
 | `sel_of` | 5 × int | array (local to `t3_all_active`) | set to the derangement `(o+2)%5` | Remembers which input each output was pointed at so the checks read `xbar_in_data[sel_of[o]]` instead of re-deriving it. |
@@ -70,7 +71,7 @@ drove itself.
 
 ## 2. RTL explanation
 
-### 2.1 Clock and reset (lines 74–75, 113–123)
+### 2.1 Clock and reset (lines 77–78, 109–119)
 
 `clk` is initialised to `0` and toggled every `CLK_PERIOD/2 = 5 ns`.
 `reset_dut()` then runs the standard sequence used by both leaf benches in this
@@ -109,55 +110,71 @@ when the DUT's three assertion families sample at the following posedge, so an
 assertion failure and a `FAIL:` line can never disagree about which cycle they
 were looking at.
 
-### 2.3 The `check` task (lines 96–104)
+### 2.3 The `check` task (`tb/noc_tb_pkg.sv`, lines 327–336)
+
+Not declared in this bench: the `import noc_tb_pkg::*` at the top of the file
+brings in `check()` together with the `checks`/`errors` counters it increments,
+and the bench's "Bookkeeping" section is only a comment saying so.
 
 ```systemverilog
-task automatic check(input string what, input logic [31:0] actual,
-                     input logic [31:0] expected);
+task automatic check(input string what, input logic [FLIT_W-1:0] actual,
+                     input logic [FLIT_W-1:0] expected);
   checks++;
-  if (actual === expected) $display("[PASS] %-58s %h", what, actual);
-  else begin
-    $display("[FAIL] %-58s got %h exp %h", what, actual, expected);
+  if (actual !== expected) begin
     errors++;
+    $display("[FAIL] %-62s got %h exp %h", what, actual, expected);
+  end else begin
+    $display("[PASS] %-62s %h", what, actual);
   end
 endtask
 ```
 
-One recorder for the whole bench: `checks` counts every comparison, `errors`
-counts mismatches, and both 4-bit `xbar_out_route_next` and 32-bit
-`xbar_out_data` reach it through the same zero-extension (the Makefile waives
-`WIDTHEXPAND` for bench compiles for exactly this reason). Comparison is `===`,
-so the *expected* side of the comparison is the whole specification of each
-check: `check("T2 out 3 sel 4 data", xbar_out_data[3], xbar_in_data[4])` says in
-one line what the mux must do.
+One recorder for the whole bench — and for every other bench that imports the
+package: `checks` counts every comparison, `errors` counts mismatches, and both
+4-bit `xbar_out_route_next` and the 40-bit `xbar_out_data` reach the
+`FLIT_W`-wide formals through zero-extension (the Makefile waives
+`WIDTHEXPAND` for bench compiles for exactly this reason). Comparison is a
+4-state `!==`, so the *expected* side of the comparison is the whole
+specification of each check: `check("T2 out 3 sel 4 data", xbar_out_data[3],
+xbar_in_data[4])` says in one line what the mux must do.
 
 At the end of `main` the bench prints a blank line and then
 `ALL %0d CHECKS PASSED` when `errors == 0`, or `%0d/%0d CHECKS FAILED`
-otherwise, before `$finish`.
+otherwise, before `$finish` — the same `CHECKS (PASSED|FAILED)` wording the
+package's `report_stats()` prints, which is what the mutation and assertion
+scripts grep for.
 
-### 2.4 The stimulus generator, and why it looks like that (lines 129–148)
+### 2.4 The stimulus generator, and why it looks like that (lines 131–148)
 
 ```systemverilog
-function automatic logic [31:0] pat(input int p);
-  logic [31:0] v;
-  v          = '0;
-  v[31:24]   = 8'(p + 1);        // per-port signature
-  v[21:14]   = 8'(7 * p + 3);    // unrelated function of p, breaks runs
-  v[13:10]   = 4'(p);            // the header's ROUTE field
-  v[9:7]     = 3'(p);            // DEST_Y
-  v[6:4]     = 3'((p + 1) % 8);  // DEST_X
-  v[3:2]     = 2'(p % 4);        // VC_ID
-  v[1:0]     = 2'b11;            // HEAD_TAIL
+function automatic logic [FLIT_W-1:0] pat(input int p);
+  logic [FLIT_W-1:0] v;
+  v = '0;
+  v = with_id   (v, 8'(7 * p + 3));       // unrelated function of p, breaks runs
+  v = with_route(v, 4'(p));               // ROUTE -- carried through untouched
+  v = with_dst  (v, 3'(p), 3'((p + 1) % 8));
+  v = with_kind (v, 2'(p % 4));           // KIND (ignored by routers, D3)
+  v = with_type (v, FLIT_HEAD_TAIL);
   return v;
 endfunction
 ```
 
 Every field that could be confused carries the port index, because a selection
-that picks the wrong input port must not be able to match by accident: a payload
-that differed only in its top byte would let a wrong-port read pass as long as
-the top byte matched. `drive_inputs()` loads `pat(p)` and `DIR[p]` into all five
-inputs, and T5 then deliberately *breaks* that per-port correlation between the
-two fields so a cross-field mix-up stops being invisible (§3.1, T5).
+that picks the wrong input port must not be able to match by accident: a
+payload that differed only in one region would let a wrong-port read pass as
+long as that region matched. Four named regions of the word carry `p` here —
+ID, ROUTE, both destination fields and KIND — plus a constant HEAD_TAIL type,
+and the whole thing is assembled through `noc_tb_pkg`'s pure setters
+(`with_id`, `with_route`, `with_dst`, `with_kind`, `with_type`) rather than by
+slicing the word, so no line of this bench names a bit position. An earlier
+revision stamped a second signature into the top byte as well; that slot
+straddles BURST and LEN and is not a field in its own right, and with four
+regions already carrying `p` there is nothing left for a wrong pick to hide
+behind, so it went when the setters arrived.
+
+`drive_inputs()` loads `pat(p)` and `DIR[p]` into all five
+inputs, and T5 then deliberately *breaks* that per-port correlation between
+the two fields so a cross-field mix-up stops being invisible (§3.1, T5).
 
 Expected values are simply the driven inputs: the bench never reads a DUT
 internal, so a wrong selection can only ever be caught by comparing
@@ -165,10 +182,11 @@ internal, so a wrong selection can only ever be caught by comparing
 
 ### 2.5 What the DUT does with all this (for orientation)
 
-The mux block in `rtl/crossbar.sv` (lines 105–129) zeroes both output arrays
+The mux block in `rtl/crossbar.sv` (lines 109–133) zeroes both output arrays
 unconditionally first — the classic latch-avoiding default — then, for each
-output, loads `d`/`r` from `xbar_sel[o]` only when `st_valid[o] && (xbar_sel[o] <
-NUM_PORTS)`. Both muxes live in one `always_comb` and are gated by the same
+output, loads `d`/`r` from `xbar_sel[o]` only when `st_valid[o]` is high and the
+index is in range (`st_valid[o] && (xbar_sel[o] < 3'(NUM_PORTS))`). Both muxes
+live in one `always_comb` and are gated by the same
 condition so they cannot drift apart. The assertions at the bottom of that file
 are the RTL's own half of the same three rules; the bench's checks are the other
 half, and they are independent: the assertions re-read the DUT's signals, the
@@ -249,14 +267,15 @@ the run without being counted in the 286.
   purpose, in two pairs of selections on output 0:
 
   - *Ports 1 and 2* (line 279): port 2's payload is overwritten with port 1's,
-    so the two carry **identical data** (`0x20284a7` for both, as the run
-    prints) but naturally **different** `route_next` (`DIR[1] = 1` vs
+    so the two carry **identical data** (`pat(1)` = `0x284a7`, which the run
+    prints as `00000284a7` — the checker's argument is the full `FLIT_W`) but
+    naturally **different** `route_next` (`DIR[1] = 1` vs
     `DIR[2] = 2`). Selecting 1 then 2 (4 checks) therefore forces the route to
     change while the data legitimately does not — here the payload check is
     blind and the route check is the discriminator.
   - *Ports 3 and 4* (lines 295–296): the mirror image. Only the `route_next`
     of port 4 is overwritten with port 3's; the payloads are left **different**,
-    so the run prints `0x4060dcf` (port 3) and `0x507d253` (port 4) while both
+    so the run prints `0000060dcf` (port 3) and `000007d253` (port 4) while both
     routes read `4`. Selecting 3 then 4 (4 checks) forces the payload to change
     while the route legitimately does not — the route check is blind and the
     payload check is the discriminator.
@@ -267,10 +286,10 @@ the run without being counted in the 286.
   opposite fields. Neither value can be read from the other mux's index and
   still pass.
 
-  > This was not always true. Line 280 used to copy port 3's payload onto port
-  > 4 as well, so the pair carried the **same** value in both fields and the
-  > four checks could not distinguish a selection of 3 from a selection of 4 —
-  > contradicting both T5's own header comment and the `T5 data now differs
+  > This was not always true. An earlier revision copied port 3's payload onto
+  > port 4 as well, so the pair carried the **same** value in both fields and
+  > the four checks could not distinguish a selection of 3 from a selection of
+  > 4 — contradicting both T5's own header comment and the `T5 data now differs
   > (port 4)` check name. Deleting that one copy is what makes the stated
   > intent hold; the check count and every check name are unchanged.
 
@@ -284,7 +303,7 @@ the run without being counted in the 286.
 output (`genvar o`, 5 instances each = 15 concurrent properties), all
 `@(posedge clk) disable iff (!rst_n)`:
 
-- **`st_valid[o] |-> (xbar_sel[o] < NUM_PORTS)`** — the selection must be in
+- **`st_valid[o] |-> (xbar_sel[o] < 3'(NUM_PORTS))`** — the selection must be in
   range. Its antecedent is true throughout T2–T5 with in-range values, so the
   property is exercised but never threatened: the bench never drives
   `xbar_sel` ≥ 5, because SA stage 2 never produces such a value. The

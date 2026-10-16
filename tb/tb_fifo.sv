@@ -5,8 +5,10 @@ module tb_fifo;
   //---------------------------------------------------------------
   // 1. Parameters
   //---------------------------------------------------------------
-  localparam int WIDTH = 32;
-  localparam int DEPTH = 8;
+  // Matches the design's flit width (linnea_v2 section 1). The FIFO is
+  // width-agnostic; this is the width the rest of the design runs at.
+  localparam int WIDTH = 40;
+  parameter  int FIFO_DEPTH = 4;
   localparam realtime CLK_PERIOD = 10ns;
 
   //---------------------------------------------------------------
@@ -62,7 +64,7 @@ module tb_fifo;
   //---------------------------------------------------------------
   fifo #(
       .WIDTH(WIDTH),
-      .DEPTH(DEPTH)
+      .DEPTH(FIFO_DEPTH)
   ) dut (
       .clk      (clk),
       .rst_n    (rst_n),
@@ -114,7 +116,7 @@ module tb_fifo;
     rd_enable = 1'b0;
     data_in   = data;
 
-    was_full  = (ref_model.size() == DEPTH);
+    was_full  = (ref_model.size() == FIFO_DEPTH);
     exp_err   = was_full;
 
     #0;
@@ -128,7 +130,7 @@ module tb_fifo;
 
     check("Write: empty flag", empty == (ref_model.size() == 0));
 
-    check("Write: full flag", full == (ref_model.size() == DEPTH));
+    check("Write: full flag", full == (ref_model.size() == FIFO_DEPTH));
 
     @(negedge clk);
 
@@ -183,7 +185,7 @@ module tb_fifo;
 
     check("Read: empty flag", empty == (ref_model.size() == 0));
 
-    check("Read: full flag", full == (ref_model.size() == DEPTH));
+    check("Read: full flag", full == (ref_model.size() == FIFO_DEPTH));
 
     @(negedge clk);
 
@@ -224,7 +226,7 @@ module tb_fifo;
     data_in   = data;
 
     was_empty = (ref_model.size() == 0);
-    was_full  = (ref_model.size() == DEPTH);
+    was_full  = (ref_model.size() == FIFO_DEPTH);
 
     //-------------------------------------------------------------
     // Check combinational protocol signals BEFORE clock edge
@@ -289,7 +291,7 @@ module tb_fifo;
 
       check("R/W normal: empty flag", empty == (ref_model.size() == 0));
 
-      check("R/W normal: full flag", full == (ref_model.size() == DEPTH));
+      check("R/W normal: full flag", full == (ref_model.size() == FIFO_DEPTH));
 
       check("R/W normal: data_out", data_out == exp_data);
 
@@ -326,7 +328,7 @@ module tb_fifo;
 
     reset_dut();
 
-    for (int i = 0; i < DEPTH; i++) begin
+    for (int i = 0; i < FIFO_DEPTH; i++) begin
       drive_write($urandom);
     end
   endtask
@@ -339,11 +341,11 @@ module tb_fifo;
 
     reset_dut();
 
-    for (int i = 0; i < DEPTH; i++) begin
+    for (int i = 0; i < FIFO_DEPTH; i++) begin
       drive_write($urandom);
     end
 
-    for (int i = 0; i < DEPTH; i++) begin
+    for (int i = 0; i < FIFO_DEPTH; i++) begin
       drive_read();
     end
   endtask
@@ -356,7 +358,7 @@ module tb_fifo;
 
     reset_dut();
 
-    for (int i = 0; i < DEPTH; i++) begin
+    for (int i = 0; i < FIFO_DEPTH; i++) begin
       drive_write($urandom);
     end
 
@@ -427,7 +429,7 @@ module tb_fifo;
     reset_dut();
 
     // Fill FIFO completely.
-    for (int i = 0; i < DEPTH; i++) begin
+    for (int i = 0; i < FIFO_DEPTH; i++) begin
       drive_write(i);
     end
 
@@ -438,7 +440,7 @@ module tb_fifo;
 
     check("Full R/W: FIFO no longer full", full == 1'b0);
 
-    check("Full R/W: occupancy reduced", ref_model.size() == DEPTH - 1);
+    check("Full R/W: occupancy reduced", ref_model.size() == FIFO_DEPTH - 1);
   endtask
 
   //---------------------------------------------------------------
@@ -450,7 +452,7 @@ module tb_fifo;
     reset_dut();
 
     // Fill FIFO completely.
-    for (int i = 0; i < DEPTH; i++) begin
+    for (int i = 0; i < FIFO_DEPTH; i++) begin
       drive_write($urandom);
     end
 
@@ -459,7 +461,7 @@ module tb_fifo;
 
     check("Protocol Violation: FIFO remains full", full == 1'b1);
 
-    check("Protocol Violation: occupancy unchanged", ref_model.size() == DEPTH);
+    check("Protocol Violation: occupancy unchanged", ref_model.size() == FIFO_DEPTH);
   endtask
 
   //---------------------------------------------------------------

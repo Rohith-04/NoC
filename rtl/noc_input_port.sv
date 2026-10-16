@@ -101,23 +101,33 @@
 // Flit format
 // -----------
 //
-// HEAD / HEAD_TAIL:
+// HEAD / HEAD_TAIL (linnea_v2 section 3.2 -- the field map above the low 14
+// bits is still marked proposed there, but the low 14 are fixed):
 //
-//   [31:14] RESERVED (HEAD_TAIL: 18-bit payload)
-//   [13:10] ROUTE
-//    [9:7]  DEST_Y
-//    [6:4]  DEST_X
-//    [3:2]  VC_ID   -- ignored by routers; the sideband vc_id is
-//                     authoritative (assumption D3) and header merge at the
-//                     output port never rewrites this field
-//    [1:0]  FLIT_TYPE
+//   [39]     PAR      parity; reserved, passed through untouched
+//   [38]     EXT      extension flag; must be 0 for now
+//   [37:35]  SRC_Y
+//   [34:32]  SRC_X
+//   [31:30]  BURST
+//   [29:22]  LEN
+//   [21:14]  ID
+//   [13:10]  ROUTE    rewritten at every hop (lookahead)
+//    [9:7]   DEST_Y
+//    [6:4]   DEST_X
+//    [3:2]   KIND     packet kind, set by the source NI; routers ignore it
+//    [1:0]   FLIT_TYPE
 //
 // BODY / TAIL:
 //
-//   [31:2]  PAYLOAD
-//    [1:0]  FLIT_TYPE
+//   [39:2]   PAYLOAD
+//    [1:0]   FLIT_TYPE
 //
-// The VC ID is link-level sideband information and is not stored in the flit.
+// Everything this module reads is in the low 14 bits (linnea_v2 section 2),
+// so everything above ROUTE is opaque payload here and the field map can
+// still move without touching this file. In particular the VC a packet
+// occupies is link-level sideband, not a flit field: the `vc_id` sideband is
+// authoritative (assumption D3), and the output port's header merge never
+// rewrites [3:2] -- which used to be VC_ID and is now KIND.
 //
 //
 // Type encoding shortcuts
@@ -145,7 +155,14 @@
 //------------------------------------------------------------------------------
 
 module noc_input_port #(
-    parameter int         NUM_VC        = 2,
+    parameter int         FLIT_W        = 40,
+    // Input FIFO depth. This MUST track the caller's FIFO_DEPTH -- the
+    // arbiter's directional credit pool is sized from the same number, and
+    // a pool larger than the buffer overruns it (a pool smaller only wastes
+    // bandwidth). It used to be hardcoded to 8 while router_top.FIFO_DEPTH
+    // only reached DIR_CREDITS, so the two silently disagreed.
+    parameter int         DEPTH         = 4,
+    parameter int         NUM_VC        = 4,
     parameter logic [2:0] CUR_X         = '0,
     parameter logic [2:0] CUR_Y         = '0,
     parameter bit         IS_LOCAL_PORT = 0
@@ -157,13 +174,15 @@ module noc_input_port #(
     // Incoming link
     //
     // vc_id is sideband: it selects which per-VC FIFO receives this flit. It
-    // is authoritative for routing/flow-control purposes; the VC_ID field
-    // inside a HEAD flit is stale after the first hop and is ignored.
+    // is authoritative for routing and flow control. A HEAD's [3:2] used to
+    // carry a VC that went stale after the first hop (assumption D3); it is
+    // KIND now, set once by the source NI and ignored here for a simpler
+    // reason -- the router is not its consumer at all.
     //--------------------------------------------------------------------------
 
-    input logic [31:0] flit_data,
+    input logic [FLIT_W-1:0] flit_data,
     input logic        flit_valid,
-    input logic [1:0]  vc_id,
+    input logic [VC_W-1:0]  vc_id,
 
     //--------------------------------------------------------------------------
     // Credit return to the upstream router
@@ -184,15 +203,16 @@ module noc_input_port #(
     //                   copy in every cycle after -- see the mux below.
     // va_req_single[v]  the packet is a single flit (HEAD_TAIL). VA uses it
     //                   as a priority tier so short packets jump ahead.
-    // va_gnt[v]         VA won this cycle; va_gnt_out_vc[v] says which
-    //                   downstream VC was assigned.
+    // va_gnt[v]         VA won this case; from here the packet owns
+    //                   downstream VC v itself -- linnea_v2 section 4.4
+    //                   matches the two, so there is no separately
+    //                   transmitted assignment to hand back.
     //--------------------------------------------------------------------------
 
     output logic [NUM_VC-1:0] req_va,
     output logic [3:0]        va_req_out_port  [NUM_VC],
     output logic [NUM_VC-1:0] va_req_single,
     input  logic [NUM_VC-1:0] va_gnt,
-    input  logic [1:0]        va_gnt_out_vc [NUM_VC],
 
     //--------------------------------------------------------------------------
     // Switch allocation (SA) interface
@@ -200,6 +220,7 @@ module noc_input_port #(
     // sa_req[v]          this VC holds a flit AND owns a downstream VC.
     // sa_req_out_port[v] which output port it wants (stage-2 target).
     // sa_req_out_vc[v]   which downstream VC it targets (credit mask index).
+    //                    Constantly v: see the note where it is driven.
     // sa_req_last[v]     the active flit is the packet's last one (TAIL or
     //                    HEAD_TAIL). The arbiter releases its output-VC
     //                    reservation when it sees this AND grants.
@@ -211,7 +232,7 @@ module noc_input_port #(
 
     output logic [NUM_VC-1:0] req_sa,
     output logic [3:0]        sa_req_out_port [NUM_VC],
-    output logic [1:0]        sa_req_out_vc   [NUM_VC],
+    output logic [VC_W-1:0]        sa_req_out_vc   [NUM_VC],
     output logic [NUM_VC-1:0] sa_req_last,
     input  logic [NUM_VC-1:0] sa_gnt,
     input  logic [NUM_VC-1:0] sa_pick,
@@ -228,9 +249,31 @@ module noc_input_port #(
     // register.
     //--------------------------------------------------------------------------
 
-    output logic [31:0] st_flit_data,
+    output logic [FLIT_W-1:0] st_flit_data,
     output logic [3:0]  st_route_next
 );
+
+  // VC index width (section 1 of linnea_v2): enough bits to name any of
+  // NUM_VC virtual channels. Derived here rather than passed in, so a
+  // -GNUM_VC sweep cannot leave the FIFO-select or request sidebands
+  // narrower than the index they carry.
+  localparam int VC_W = (NUM_VC > 1) ? $clog2(NUM_VC) : 1;
+
+  //-------------------------------------------------------------------------
+  // Parameter checks
+  //
+  // DEPTH's own rule is enforced by fifo; what matters here is that this
+  // module's DEPTH and NUM_VC stay addressable, because both are swept from
+  // outside.
+  //-------------------------------------------------------------------------
+
+  initial begin
+    assert ((NUM_VC == 2) || (NUM_VC == 4) || (NUM_VC == 8))
+    else $fatal(1, "noc_input_port: NUM_VC must be 2, 4 or 8 so that VC_W = clog2(NUM_VC) addresses it exactly, got %0d", NUM_VC);
+
+    assert (FLIT_W >= 16)
+    else $fatal(1, "noc_input_port: FLIT_W must be at least 16, got %0d", FLIT_W);
+  end
 
 
   //===========================================================================
@@ -276,11 +319,16 @@ module noc_input_port #(
   // packet's last flit leaves. (Was named `own_route`.)
   logic [3:0] out_port [NUM_VC];
 
-  // out_vc: output-side VC assigned during VA. Held for the packet's life.
-  logic [1:0] out_vc [NUM_VC];
-
   // assignment_valid: this VC's packet owns a downstream VC, so it is
   // allowed to ask for the switch. Cleared when the last flit is granted.
+  //
+  // There is no companion `out_vc` any more. It used to hold the output VC
+  // VA assigned, because a separable allocator could hand input VC 1 a
+  // downstream VC 3 and the port had to remember which. Under linnea_v2
+  // section 4.4 the assignment is always the requester's own index, so the
+  // register reproduced a value already known at every point of use -- one
+  // register of NUM_VC x VC_W bits removed, along with the arbiter output
+  // port and the two wires that fed it.
   logic [NUM_VC-1:0] assignment_valid;
 
   // in_pkt: VERIFICATION ONLY -- no datapath logic reads it. High while this
@@ -299,7 +347,7 @@ module noc_input_port #(
   logic [NUM_VC-1:0] fifo_wr_enable;
   logic [NUM_VC-1:0] fetch;  // == fifo_rd_enable, by construction
 
-  logic [31:0] fifo_data_out [NUM_VC];
+  logic [FLIT_W-1:0] fifo_data_out [NUM_VC];
 
   logic [NUM_VC-1:0] fifo_empty;
   logic [NUM_VC-1:0] fifo_full;
@@ -361,7 +409,7 @@ module noc_input_port #(
       //=======================================================================
 
       always_comb begin
-        fifo_wr_enable[i] = flit_valid && (vc_id == 2'(i));
+        fifo_wr_enable[i] = flit_valid && (vc_id == VC_W'(i));
       end
 
 
@@ -392,15 +440,15 @@ module noc_input_port #(
       //=======================================================================
       // Per-VC FIFO
       //
-      // DEPTH = 8 buffer slots. With data_out acting as a ninth slot, the
-      // downstream side holds 9 physical positions against the 8 credits it
-      // is issued -- one slot of slack, which is what absorbs a credit
-      // returning in the same cycle a flit is being consumed.
+      // DEPTH buffer slots. With data_out acting as a further slot, the
+      // downstream side holds DEPTH+1 physical positions against the DEPTH
+      // credits it is issued -- one slot of slack, which is what absorbs a
+      // credit returning in the same cycle a flit is being consumed.
       //=======================================================================
 
       fifo #(
-          .WIDTH(32),
-          .DEPTH(8)
+          .WIDTH(FLIT_W),
+          .DEPTH(DEPTH)
       ) u_fifo (
           .clk       (clk),
           .rst_n     (rst_n),
@@ -511,8 +559,14 @@ module noc_input_port #(
       //
       //   sa_req          = head_valid && assignment_valid
       //   sa_req_out_port = out_port      (latched, stable for the packet)
-      //   sa_req_out_vc   = out_vc        (credit-mask index)
+      //   sa_req_out_vc   = the VC index  (credit-mask index)
       //   sa_req_last     = is_last       (TAIL or HEAD_TAIL)
+      //
+      // sa_req_out_vc is the VC-matched rule in its final form: input VC v
+      // was reserved as output VC v, so the credit pool to test is simply
+      // this VC's own pool. It used to read a register that captured what VA
+      // handed back; with section 4.4 that register held `i` on every write,
+      // so the read became a lookup of the index it was being indexed by.
       //
       // sa_req_last is a level, not a pulse: it is asserted for as long as
       // the last flit sits at the head. The arbiter ANDs it with its own
@@ -523,7 +577,7 @@ module noc_input_port #(
       always_comb begin
         req_sa[i]          = head_valid[i] && assignment_valid[i];
         sa_req_out_port[i] = out_port[i];
-        sa_req_out_vc[i]   = out_vc[i];
+        sa_req_out_vc[i]   = VC_W'(i);
         sa_req_last[i]     = is_last[i];
       end
 
@@ -668,21 +722,16 @@ module noc_input_port #(
 
       assignment_valid <= '0;
 
-      for (int v = 0; v < NUM_VC; v++) begin
-        out_vc[v] <= '0;
-      end
-
     end
 
     else begin
 
       for (int v = 0; v < NUM_VC; v++) begin
 
-        // Capture the output VC the allocator assigned.
-        if (va_gnt[v]) begin
-          assignment_valid[v] <= 1'b1;
-          out_vc[v]           <= va_gnt_out_vc[v];
-        end
+        // Mark the VC as owning a downstream slot. There is nothing to
+        // remember about WHICH slot: linnea_v2 section 4.4 matches input VC
+        // v to output VC v, so the ownership is the index itself.
+        if (va_gnt[v]) assignment_valid[v] <= 1'b1;
 
         // Release on the packet's final flit. HEAD_TAIL qualifies as last
         // through is_last, so a single-flit packet sets and clears this in
@@ -814,14 +863,6 @@ module noc_input_port #(
                        va_gnt[g] |-> !assignment_valid[g])
         else $error("noc_input_port: va_gnt while assignment already valid on VC %0d", g);
 
-      // out_vc must have been written before anything can depend on it.
-      // Note: $isunknown is trivially false in a 2-state simulator, so this
-      // only has teeth under VCS -- kept deliberately, since that is where
-      // the network will ultimately be verified.
-      assert property (@(posedge clk) disable iff (!rst_n)
-                       assignment_valid[g] |-> !$isunknown(out_vc[g]))
-        else $error("noc_input_port: out_vc unknown while assignment valid on VC %0d", g);
-
       // -- Type encoding ---------------------------------------------------
       // is_head gates VA eligibility and route capture; is_last tells the
       // arbiter when to release the output VC. Both shortcuts are stated
@@ -880,7 +921,7 @@ module noc_input_port #(
       else $error("noc_input_port: sa_pick not one-hot: %b", sa_pick);
 
     // At most one VC on this port may be switched in a cycle -- the port has
-    // a single 32-bit datapath to the crossbar.
+    // a single flit-wide datapath to the crossbar.
     assert property (@(posedge clk) disable iff (!rst_n)
                      $countones(sa_gnt) <= 1)
       else $error("noc_input_port: multiple VCs granted on one port: %b", sa_gnt);

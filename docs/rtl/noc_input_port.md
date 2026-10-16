@@ -25,12 +25,19 @@ having them.
 
 ### 1.1 Parameters
 
-| Name | Type | Default | Meaning |
-|---|---|---|---|
-| `NUM_VC` | `int` | 2 | Virtual channels on this port (spec §1.1). |
-| `CUR_X` | `logic [2:0]` | `'0` | This router's X coordinate, folded into `route_compute`. |
-| `CUR_Y` | `logic [2:0]` | `'0` | This router's Y coordinate. |
-| `IS_LOCAL_PORT` | `bit` | 0 | `1` on the LOCAL instance: there is no upstream header, so `route_compute` derives `route_self` from the destination fields and `rc_route_in` is structurally ignored. `0` on NORTH/EAST/WEST/SOUTH: the previous router already computed `route_self` and put it in bits `[13:10]`. |
+| Name | Type | Default | Constraint | Meaning |
+|---|---|---|---|---|
+| `FLIT_W` | `int` | 40 | `>= 16` (asserted) | Flit width. Everything this module *reads* is in the low 14 bits, so the width only sizes the payload path — the field map above ROUTE is opaque here. |
+| `DEPTH` | `int` | 4 | power of two, `>= 2` (enforced by `fifo`) | Input FIFO depth per VC. **Must track the caller's `FIFO_DEPTH`**: the arbiter's directional credit pool is sized from the same number, and a pool larger than the buffer would overrun it. `router_top` passes `.DEPTH(FIFO_DEPTH)` so the two cannot drift. |
+| `NUM_VC` | `int` | 4 | 2, 4 or 8 (asserted) | Virtual channels on this port (v2 §1). |
+| `CUR_X` | `logic [2:0]` | `'0` | `—` | This router's X coordinate, folded into `route_compute`. |
+| `CUR_Y` | `logic [2:0]` | `'0` | `—` | This router's Y coordinate. |
+| `IS_LOCAL_PORT` | `bit` | 0 | `—` | `1` on the LOCAL instance: there is no upstream header, so `route_compute` derives `route_self` from the destination fields and `rc_route_in` is structurally ignored. `0` on NORTH/EAST/WEST/SOUTH: the previous router already computed `route_self` and put it in bits `[13:10]`. |
+
+Derived: `VC_W = (NUM_VC > 1) ? $clog2(NUM_VC) : 1` (line 260) — the VC index
+width, which sizes `vc_id` and `sa_req_out_vc`. It is derived here rather than
+passed in, so a `-GNUM_VC` sweep cannot leave a sideband narrower than the
+index it carries.
 
 ### 1.2 Port declaration
 
@@ -40,22 +47,21 @@ Direction is from the DUT's point of view.
 |---|---|---|---|---|
 | `clk` | 1 | input | clock generator → FIFOs, both `always_ff`, all SVA | Rising edge. |
 | `rst_n` | 1 | input | reset generator → FIFOs, `always_ff`, `disable iff` | **Synchronous, active low** — deliberately matching `fifo.sv`. Mixing async-reset and sync-reset flops on one reset net is a classic synthesis surprise (recovery/removal violations on the async ones only), so every sequential block in this design uses `@(posedge clk)` + `if (!rst_n)`. |
-| `flit_data` | 32 | input | upstream `noc_output_port.flit_data` (or the NI) → FIFO `data_in` and the field extract | Incoming payload. Format: see §1.4. |
+| `flit_data` | `FLIT_W` (40) | input | upstream `noc_output_port.flit_data` (or the NI) → FIFO `data_in` and the field extract | Incoming payload. Format: see §1.4. |
 | `flit_valid` | 1 | input | upstream `flit_valid` → `fifo_wr_enable` decode | Write enable for exactly the FIFO named by `vc_id`. |
-| `vc_id` | 2 | input | upstream `vc_id` sideband → VC demultiplex | **Authoritative** VC selector. The `VC_ID` field inside a HEAD flit (bits `[3:2]`) is stale after the first hop and is ignored — assumption D3. |
+| `vc_id` | `VC_W` (2 at `NUM_VC = 4`) | input | upstream `vc_id` sideband → VC demultiplex | **Authoritative** VC selector. The field inside a HEAD flit at bits `[3:2]` used to be `VC_ID` and is stale after the first hop; it is `KIND` now, set once by the source NI and ignored here (assumption D3). |
 | `credit_return_valid` | `NUM_VC` | output | `noc_input_port` → upstream router's `ds_credit_valid[...][k]` | One bit per VC, so two VCs may free a slot in the same cycle. Registered: `credit_return_valid <= fetch`, so it means "one FIFO slot was freed by a prefetch read", **not** "one flit left the router". |
 | `req_va` | `NUM_VC` | output | input port → `arbiter.va_req` | `head_valid && !assignment_valid && is_head` — this VC holds a HEAD and does not yet own a downstream VC. |
 | `va_req_out_port` | `NUM_VC × 4` (unpacked) | output | input port → `arbiter.va_req_out_port` | The output port the packet needs from *this* router. Live `route_compute` output in the arrival cycle, the latched copy every cycle after (§2.5). |
 | `va_req_single` | `NUM_VC` | output | input port → `arbiter.va_req_single` | The packet is a single flit (HEAD_TAIL). VA uses it as a priority tier so short packets jump ahead. |
-| `va_gnt` | `NUM_VC` | input | `arbiter.va_gnt` → assignment state | VA won this cycle. |
-| `va_gnt_out_vc` | `NUM_VC × 2` (unpacked) | input | `arbiter.va_gnt_out_vc` → `out_vc[v]` | Which downstream VC was assigned; latched for the packet's life. |
+| `va_gnt` | `NUM_VC` | input | `arbiter.va_gnt` → assignment state | VA won this cycle. Under VC matching (v2 §4.4) the grant on VC `v` *is* the allocation: the packet now owns downstream VC `v` itself, so there is no separately transmitted assignment to latch. |
 | `req_sa` | `NUM_VC` | output | input port → `arbiter.sa_req` | `head_valid && assignment_valid` — this VC holds a flit **and** owns a downstream VC. |
 | `sa_req_out_port` | `NUM_VC × 4` (unpacked) | output | input port → `arbiter.sa_req_out_port` | Which output port it wants (stage-2 target). The latched `out_port[v]`, stable for the packet. |
-| `sa_req_out_vc` | `NUM_VC × 2` (unpacked) | output | input port → `arbiter.sa_req_out_vc` | Which downstream VC it targets — the credit-mask index. |
+| `sa_req_out_vc` | `NUM_VC × VC_W` (unpacked) | output | input port → `arbiter.sa_req_out_vc` | Which downstream VC it targets — the credit-mask index. Constantly the VC's own index `v` (VC matching, §2.7), so the pool tested is this VC's own pool. |
 | `sa_req_last` | `NUM_VC` | output | input port → `arbiter.sa_req_last` | The active flit is the packet's last (TAIL or HEAD_TAIL). A **level**, not a pulse: asserted as long as the last flit sits at the head, and the arbiter ANDs it with its own grant before releasing the output-VC reservation — so a stalled TAIL cannot release anything. |
 | `sa_gnt` | `NUM_VC` | input | `arbiter.sa_gnt` → fetch rule, head tracker, assignment release | Stage 2 granted this VC; its flit crosses this cycle. |
 | `sa_pick` | `NUM_VC` | input | `arbiter.sa_pick` → OR-mux | Stage 1 picked this VC; selects the pre-crossbar mux early so the data mux is not on the stage-2 path. `sa_gnt` implies `sa_pick`. |
-| `st_flit_data` | 32 | output | input port → `router_top` fold → `crossbar.xbar_in_data[p]` | Post-mux payload for this port. The VC OR-mux is resolved **here**, so the crossbar only has to mux across input ports rather than stacking a 2:1 VC mux inside a 5:1 mux. |
+| `st_flit_data` | `FLIT_W` (40) | output | input port → `router_top` fold → `crossbar.xbar_in_data[p]` | Post-mux payload for this port. The VC OR-mux is resolved **here**, so the crossbar only has to mux across input ports rather than stacking a `NUM_VC`-way VC mux inside a 5:1 mux. |
 | `st_route_next` | 4 | output | input port → `router_top` fold → `crossbar.xbar_in_route_next[p]` | Lookahead for the downstream router, to be merged into `[13:10]` of a HEAD by `noc_output_port`. |
 
 ### 1.3 Registers and state
@@ -65,11 +71,10 @@ Direction is from the DUT's point of view.
 | `head_valid` | `NUM_VC` | register | `'0` | `data_out` holds an active, fetched flit. High in the **arrival cycle** (t+1 after a fetch in t), aligned with the data itself. |
 | `arrive` | `NUM_VC` | register | `'0` | Registered `fetch`. High in exactly the cycle a freshly fetched flit appears on `data_out`. The **only** event that marks "a new flit is here"; it drives route capture and the live VA output-port mux. (Historically `fifo_rd_enable_d1`; renamed because it became load-bearing.) |
 | `out_port` | `NUM_VC × 4` (unpacked) | register | `DIR_LOCAL` per VC | This VC's packet's exit port from *this* router. Captured from `rc_route_self` on the arrival cycle, held until the packet's last flit leaves. |
-| `out_vc` | `NUM_VC × 2` (unpacked) | register | `'0` | Downstream VC assigned by VA, held for the packet's life. |
-| `assignment_valid` | `NUM_VC` | register | `'0` | This VC's packet owns a downstream VC, so it may ask for the switch. Set by `va_gnt`, cleared by `sa_gnt && is_last`. |
+| `assignment_valid` | `NUM_VC` | register | `'0` | This VC's packet owns a downstream VC, so it may ask for the switch. Set by `va_gnt`, cleared by `sa_gnt && is_last`. There is deliberately **no `out_vc` register**: under VC matching (v2 §4.4) input VC `v` is always assigned output VC `v`, so the register would only have reproduced a value every reader already knows. |
 | `in_pkt` | `NUM_VC` | register | `'0` | **Verification only — no datapath logic reads it.** High while this VC is between a HEAD and its TAIL. Exists so the sequence assertion can state the rule in the spec's vocabulary ("HEAD, BODY\*, TAIL") instead of restating the type encoding at every use. |
 | `fifo_wr_enable`, `fetch` | `NUM_VC` each | wire (combinational) | n/a | Write decode and the read/fetch rule (§2.3). `fetch == fifo_rd_enable` by construction. |
-| `fifo_data_out` | `NUM_VC × 32` | wire | n/a | Each FIFO's registered output — the per-VC "head register". |
+| `fifo_data_out` | `NUM_VC × FLIT_W` | wire | n/a | Each FIFO's registered output — the per-VC "head register". |
 | `fifo_empty`, `fifo_full`, `fifo_err` | `NUM_VC` each | wire | n/a | FIFO status. |
 | `rc_dest_x`, `rc_dest_y` | `NUM_VC × 3` each | wire | n/a | Header fields `[6:4]` / `[9:7]` of `data_out`. |
 | `rc_route_in` | `NUM_VC × 4` | wire | n/a | Header `[13:10]` of `data_out` — the sender's lookahead, consumed as `route_in`. |
@@ -80,14 +85,23 @@ Direction is from the DUT's point of view.
 
 ### 1.4 Flit format and type encoding
 
+40-bit flit (`FLIT_W = 40`). Only the low 14 bits are read by any router;
+everything above ROUTE is opaque here:
+
 ```
-HEAD / HEAD_TAIL           BODY / TAIL
-[31:14] RESERVED           [31:2]  PAYLOAD
-[13:10] ROUTE               [1:0]  FLIT_TYPE
- [9:7]  DEST_Y
- [6:4]  DEST_X
- [3:2]  VC_ID   (ignored by routers; the sideband vc_id is authoritative)
- [1:0]  FLIT_TYPE
+HEAD / HEAD_TAIL                      BODY / TAIL
+[39]     PAR      (reserved)          [39]     PAR
+[38]     EXT      (must be 0)         [38]     spare
+[37:35]  SRC_Y                        [37:34]  WSTRB
+[34:32]  SRC_X                        [33:2]   WDATA / RDATA
+[31:30]  BURST                        [1:0]    FLIT_TYPE
+[29:22]  LEN
+[21:14]  ID
+[13:10]  ROUTE   (rewritten every hop)
+ [9:7]   DEST_Y
+ [6:4]   DEST_X
+ [3:2]   KIND    (was VC_ID; set by the source NI, ignored by routers)
+ [1:0]   FLIT_TYPE
 ```
 
 | type | name | `is_head = type[0]` | `is_last = type[1]` |
@@ -97,8 +111,13 @@ HEAD / HEAD_TAIL           BODY / TAIL
 | `10` | TAIL | 0 | 1 |
 | `11` | HEAD_TAIL | 1 | 1 |
 
+KIND at `[3:2]` (`00` WR_REQ, `01` RD_REQ, `10` WR_RESP, `11` RD_RESP) is set
+once by the source NI and never read here: the VC a packet occupies is
+sideband information, not a flit field, and `vc_id` is authoritative
+(assumption D3).
+
 Both shortcuts depend on this exact encoding, so there is an elaboration-time
-assertion pinning it down (§2.7).
+assertion pinning it down (§2.8).
 
 ---
 
@@ -180,7 +199,8 @@ loop safe against the same-cycle arrival/departure case.
 Registering also keeps the credit wire off this module's combinational path
 (assumption D4).
 
-With `DEPTH = 8` that is 9 physical positions against 8 credits.
+With the default `DEPTH = 4` that is 5 physical positions against 4
+credits.
 
 ### 2.5 The arrival-cycle live mux
 
@@ -199,7 +219,7 @@ requestable".
 Without it, a HEAD arriving into an idle VC would request VA against
 `out_port = DIR_LOCAL` and win an allocation it has no business having.
 
-### 2.6 The sequential block (lines 560–648)
+### 2.6 The sequential block (lines 614–702)
 
 Three events in one `always_ff`, with their relative priority being the whole
 ballgame:
@@ -224,11 +244,11 @@ actually fetched — the packet-boundary tracker therefore observes every flit
 on this VC exactly once and in order, which is what the sequence assertion
 polices: no flit skipped, none seen twice.
 
-A second, smaller `always_ff` owns `assignment_valid` / `out_vc`:
+A second, smaller `always_ff` (lines 719–747) owns `assignment_valid`:
 
 ```systemverilog
-if (va_gnt[v])                        begin assignment_valid[v] <= 1'b1; out_vc[v] <= va_gnt_out_vc[v]; end
-if (sa_gnt[v] && is_last[v])          assignment_valid[v] <= 1'b0;
+if (va_gnt[v])               assignment_valid[v] <= 1'b1;
+if (sa_gnt[v] && is_last[v]) assignment_valid[v] <= 1'b0;
 ```
 
 VA and SA release the bit from opposite ends. They are two separate `if`s
@@ -238,13 +258,20 @@ but last-write-wins makes the outcome well defined regardless of which
 convention a future edit assumes. A HEAD_TAIL packet sets and clears the bit
 in two consecutive cycles with no special-casing.
 
+Nothing else is latched on `va_gnt`: under VC matching (v2 §4.4) the assigned
+downstream VC *is* this VC's index, so the old `out_vc` register, the
+`va_gnt_out_vc` wire that fed it, and the arbiter output port behind that wire
+are all gone.
+
 ### 2.7 Requests and the crossbar-facing OR-mux
 
 - `req_va = head_valid && !assignment_valid && is_head` — asked **exactly
   once per packet**. BODY/TAIL never ask (they inherit the assignment) and a
   VC mid-packet never re-asks.
-- `req_sa = head_valid && assignment_valid`, with `sa_req_out_port/out_vc`
-  read straight from the latched registers.
+- `req_sa = head_valid && assignment_valid`, with `sa_req_out_port` read
+  straight from the latched `out_port` register and `sa_req_out_vc` driven as
+  the constant `VC_W'(v)` — input VC `v` was reserved as output VC `v`, so
+  the credit pool to test is simply this VC's own.
 - The OR-mux:
 
   ```systemverilog
@@ -260,12 +287,18 @@ in two consecutive cycles with no special-casing.
   because the seed assignment happens first in the same evaluation, so there
   is no combinational feedback.
 
-### 2.8 Assertions (lines 748–888)
+### 2.8 Assertions (lines 797–929)
 
 Unconditional SVA — this toolchain parses it today and VCS will later; there
 is deliberately no per-simulator conditional anywhere in the RTL.
 
-**Elaboration-time (line 748).** Pins the type-encoding table itself. Editing
+**Elaboration-time parameter checks (lines 270–276).** `NUM_VC` must be 2, 4
+or 8 so that `VC_W = clog2(NUM_VC)` addresses every VC exactly, and `FLIT_W`
+must be at least 16. Both are `$fatal`s that fire before the first clock edge
+and name the parameter, so a bad `-G` override fails as the configuration
+error it is instead of surfacing later as an index landing outside its array.
+
+**Elaboration-time (line 797).** Pins the type-encoding table itself. Editing
 `FLIT_TAIL` alone would pass the dynamic check while silently disagreeing with
 every other module and testbench that hard-codes `2'b10` — hence both a static
 and a dynamic check.
@@ -282,7 +315,6 @@ and a dynamic check.
 | `!(fifo_wr_enable && fifo_full)` | Writing into a full FIFO means the arbiter handed out more credits than the downstream buffer has slots. **Credit accounting is what is being indicted, not this module.** |
 | `!fifo_err` | The FIFO's own union of the two illegal operations, asserted separately as belt-and-braces: if the FIFO's idea of a violation ever drifts from this module's, one of the three catches it. |
 | `va_gnt \|-> !assignment_valid` | A VA grant while an assignment is already live would leak the old downstream VC — two packets believing they own it. |
-| `assignment_valid \|-> !$isunknown(out_vc)` | `out_vc` must be written before anything depends on it. Note `$isunknown` is trivially false in a 2-state simulator, so this only has teeth under VCS — kept deliberately, since that is where the network will ultimately be verified. |
 | `head_valid \|->` both type shortcuts match the named constants | `is_head` gates VA eligibility and route capture; `is_last` tells the arbiter when to release the output VC. Stated against named constants rather than raw bit positions so an encoding change must be made deliberately, next to the comment explaining why it is safe. |
 | `head_valid \|-> out_port` is one of the five `DIR_*` codes | Checked against the legal codes, not merely "one-hot", so a corrupted `4'b0011` is caught too. Written as a chain of `==` rather than `inside {…}` because the tool refuses that form inside a property. |
 | `arrive \|-> (in_pkt ? !is_head : is_head)` | **Flit sequence: HEAD, BODY\*, TAIL** (spec §8). Sampled on `arrive`, which pulses once per fetched flit, so it sees every flit once and in order. `in_pkt` still holds the state from *before* this flit, because the sequential block updates it at the same edge — exactly the "what was I expecting next?" answer the check needs. A continuation while no packet is open → a header was lost. A head while a packet is open → a second header, or a flit seen twice. |
@@ -292,15 +324,15 @@ and a dynamic check.
 | Property | Protects |
 |---|---|
 | `$countones(sa_pick) <= 1` | At most one pick — not *exactly* one: when the port has nothing to offer, stage 1 picks nothing and all bits are 0. |
-| `$countones(sa_gnt) <= 1` | At most one VC may be switched in a cycle; the port has a single 32-bit datapath to the crossbar. |
+| `$countones(sa_gnt) <= 1` | At most one VC may be switched in a cycle; the port has a single flit-wide datapath to the crossbar. |
 
 ---
 
 ## 3. Testing explanation
 
 **Bench:** `tb/tb_noc_input_port.sv`, top module `tb_noc_input_port`
-(**139** checks). Uses `tb/mock_arbiter.sv` in place of the real arbiter.
-**Run:** `make TOP=noc_input_port sim` → `Checks : 139 / Errors : 0 /
+(**143** checks). Uses `tb/mock_arbiter.sv` in place of the real arbiter.
+**Run:** `make TOP=noc_input_port sim` → `Checks : 143 / Errors : 0 /
 ALL TESTS PASSED`.
 
 ### 3.1 Why a mock arbiter
@@ -309,7 +341,10 @@ The split in the module header exists precisely so this module can be tested
 without the arbiter. The mock grants on demand and in the pattern the spec's
 section 3 timeline requires, so the bench can say "cycle *c2*: grant" and
 check the exact consequence — rather than modelling SA's credit masks and
-round-robin just to get a grant to happen.
+round-robin just to get a grant to happen. With VC matching (v2 §4.4) its VA
+model is a plain combinational accept: there is no output VC for it to
+choose, because the grant on VC `v` *is* the assignment, so there is nothing
+for this module to capture.
 
 ### 3.2 What the tests cover
 
@@ -334,18 +369,20 @@ round-robin just to get a grant to happen.
 - **Credit return timing** — registered, one cycle after the fetch.
 - **Sequence integrity** across a multi-flit packet and across back-to-back
   packets on the same VC.
-- **Reset** — `head_valid`, `arrive`, `credit_return_valid`, `in_pkt` and
-  `out_port` all take their documented reset values.
+- **Reset** — out of reset with nothing offered, nothing is requested,
+  granted, switched or credited: `req_va`, `req_sa`, `credit_return_valid`,
+  `va_req_single`, `sa_req_last`, `st_flit_data` and `st_route_next` are all
+  zero.
 
 ### 3.3 Assertion coverage
 
-All fifteen assertions in §2.8 — fourteen `assert property` blocks plus the
-elaboration-time encoding check — are live throughout the run, including the
-elaboration-time encoding check. `tools/assert_neg.sh` proves the sequence
-property actually fires, with `--assert` **on**:
+All thirteen `assert property` blocks in §2.8 plus both elaboration-time
+families (the parameter checks and the encoding check, both in §2.8) are
+live throughout the run. `tools/assert_neg.sh` proves the sequence property
+actually fires, with `--assert` **on**:
 
 ```
-%Error: noc_input_port.sv:870: Assertion failed in TOP.tb_noc_input_port.u_relay.gen_assert_vc[0]:
+%Error: noc_input_port.sv:911: Assertion failed in TOP.tb_noc_input_port.u_relay.gen_assert_vc[0]:
         noc_input_port: flit sequence broken on VC 0: type=00 while in_pkt=0
 ```
 
@@ -356,11 +393,22 @@ assertion side of the flow works and is not vacuous.
 
 ### 3.4 Mutation sanity
 
-`tools/mutate_all.sh` runs one mutation against `tb_router_top`:
+`tools/mutate_all.sh` runs six mutations against `tb_router_top`; one of them
+targets this file:
 
 | Mutation | Result |
 |---|---|
-| grant wins over fetch (spec §9) — swap the `head_valid` assignment order so `sa_gnt` clears before `fetch` sets | **18/49 CHECKS FAILED** |
+| grant wins over fetch (spec §9) — swap the `head_valid` assignment order so `sa_gnt` clears before `fetch` sets | **killed — 16/49** |
+
+The suite builds with `--assert` **off**, so it is the bench rather than the
+SVA that catches it; the run prints a lowercase `killed` beside
+`tb_router_top`'s `CHECKS FAILED` line. That bench reports `ALL 104 CHECKS
+PASSED` clean, but this is the mutant that drops it to a denominator of 49:
+with the ordering broken the pipeline advances one flit every three cycles,
+packets stop arriving, and every one of the bench's `if (rx_n() >= k)`
+guards takes its checks out of the count (see `tb_router_top.md` §3.4). So
+the two numbers mean opposite things — 104 is the healthy run, 49 is how
+much of the bench this bug managed to silence.
 
 That is the ordering described in §2.6: with the grant winning, a back-to-back
 stream advances one flit every three cycles and the throughput claims in

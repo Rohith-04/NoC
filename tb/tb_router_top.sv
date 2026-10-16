@@ -58,17 +58,30 @@
 
 module tb_router_top;
 
+  // The flit model and the shared reporter. Everything this bench knows
+  // about field positions comes from here (see the header of noc_tb_pkg.sv).
+  import noc_tb_pkg::*;
+
   //---------------------------------------------------------------
   // 1. Parameters
   //---------------------------------------------------------------
+  // FLIT_W is NOT redeclared here. noc_tb_pkg owns it, and a second
+  // declaration in this scope would both hide the package's (VARHIDDEN) and
+  // let the two drift apart -- a bench at 32 reading a codec at 40 fails
+  // nowhere and everywhere. One definition, and it is in the file that also
+  // defines the field map the width is a width *of*.
+
   localparam int          NUM_PORTS   = 5;
-  localparam int          NUM_VC      = 2;
+  parameter  int          NUM_VC      = 4;
+  // VC index width (linnea_v2 section 1): derived rather than independent,
+  // so a sideband can never be narrower than the index it carries.
+  localparam int          VC_W        = (NUM_VC > 1) ? $clog2(NUM_VC) : 1;
   localparam int          LOCAL_IDX   = 0;
   localparam int          NORTH_IDX   = 1;
   localparam int          EAST_IDX    = 2;
   localparam int          WEST_IDX    = 3;
   localparam int          SOUTH_IDX   = 4;
-  localparam int          FIFO_DEPTH  = 8;
+  parameter  int          FIFO_DEPTH  = 4;
   localparam int          LOCAL_CRED  = 4;
   localparam realtime     CLK_PERIOD  = 10ns;
 
@@ -78,10 +91,7 @@ module tb_router_top;
   localparam logic [2:0]  CUR_X = 3'd1;
   localparam logic [2:0]  CUR_Y = 3'd1;
 
-  localparam logic [1:0]  FLIT_BODY      = 2'b00;
-  localparam logic [1:0]  FLIT_HEAD      = 2'b01;
-  localparam logic [1:0]  FLIT_TAIL      = 2'b10;
-  localparam logic [1:0]  FLIT_HEAD_TAIL = 2'b11;
+  // FLIT_HEAD / FLIT_BODY / FLIT_TAIL / FLIT_HEAD_TAIL come from the package.
 
   localparam logic [3:0]  DIR_LOCAL = 4'b0000;
   localparam logic [3:0]  DIR_NORTH = 4'b0001;
@@ -95,22 +105,23 @@ module tb_router_top;
   logic                            clk;
   logic                            rst_n;
 
-  logic [NUM_PORTS-1:0][31:0]      in_flit_data;
+  logic [NUM_PORTS-1:0][FLIT_W-1:0]      in_flit_data;
   logic [NUM_PORTS-1:0]            in_flit_valid;
-  logic [NUM_PORTS-1:0][1:0]       in_vc_id;
+  logic [NUM_PORTS-1:0][VC_W-1:0]       in_vc_id;
 
-  logic [NUM_PORTS-1:0][31:0]      out_flit_data;
+  logic [NUM_PORTS-1:0][FLIT_W-1:0]      out_flit_data;
   logic [NUM_PORTS-1:0]            out_flit_valid;
-  logic [NUM_PORTS-1:0][1:0]       out_vc_id;
+  logic [NUM_PORTS-1:0][VC_W-1:0]       out_vc_id;
 
   logic [NUM_PORTS-1:0][NUM_VC-1:0] credit_return_valid;
   logic [NUM_PORTS-1:0][NUM_VC-1:0] ds_credit_valid;
 
   //---------------------------------------------------------------
   // 3. Bookkeeping
+  //
+  // `checks`, `errors` and the `check`/`check_true` tasks come from
+  // noc_tb_pkg -- one reporter for every bench.
   //---------------------------------------------------------------
-  int checks = 0;
-  int errors = 0;
 
   //---------------------------------------------------------------
   // 4. Clock
@@ -149,79 +160,21 @@ module tb_router_top;
 
   //---------------------------------------------------------------
   // 6. Check helpers
+  //
+  // `check` and `check_true` -- and the `checks`/`errors` counters they
+  // bump -- live in noc_tb_pkg now, so every bench reports in the same
+  // format and a bench cannot quietly grow its own reporter.
   //---------------------------------------------------------------
-  task automatic check(input string what, input logic [31:0] actual,
-                       input logic [31:0] expected);
-    checks++;
-    if (actual === expected) $display("[PASS] %-62s %h", what, actual);
-    else begin
-      $display("[FAIL] %-62s got %h exp %h", what, actual, expected);
-      errors++;
-    end
-  endtask
-
-  task automatic check_true(input string what, input bit cond);
-    checks++;
-    if (cond) $display("[PASS] %-62s", what);
-    else begin
-      $display("[FAIL] %-62s", what);
-      errors++;
-    end
-  endtask
 
   //---------------------------------------------------------------
-  // 7. Flit constructors (section 2 formats)
+  // 7. Flit constructors
+  //
+  // mk_head / mk_ht / mk_body / mk_tail come from noc_tb_pkg. They used to
+  // be duplicated here and in tb_router_chain, with a comment in the chain
+  // bench warning that the two copies "must stay identical ... because the
+  // chain tests compare a received body against the one that was sent".
+  // There is one copy now, so the warning has nothing to guard against.
   //---------------------------------------------------------------
-  function automatic logic [31:0] mk_head(input logic [2:0] dx, input logic [2:0] dy,
-                                          input logic [3:0] route, input logic [1:0] vc,
-                                          input logic [17:0] tag);
-    logic [31:0] f;
-    f         = '0;
-    f[1:0]    = FLIT_HEAD;
-    f[3:2]    = vc;
-    f[6:4]    = dx;
-    f[9:7]    = dy;
-    f[13:10]  = route;
-    f[31:14]  = tag;      // reserved on the wire, used here to identify packets
-    return f;
-  endfunction
-
-  function automatic logic [31:0] mk_ht(input logic [2:0] dx, input logic [2:0] dy,
-                                        input logic [3:0] route, input logic [1:0] vc,
-                                        input logic [17:0] tag);
-    logic [31:0] f;
-    f         = '0;
-    f[1:0]    = FLIT_HEAD_TAIL;
-    f[3:2]    = vc;
-    f[6:4]    = dx;
-    f[9:7]    = dy;
-    f[13:10]  = route;
-    f[31:14]  = tag;
-    return f;
-  endfunction
-
-  // The filler in [13:2] is deliberately non-zero in [13:10] -- the exact
-  // field the output port merges into a header. A real direction value
-  // there (rather than a run of zeros) is what makes "the merge leaked onto
-  // a BODY/TAIL" observable: the lookahead for these payload bits is never
-  // the value they already carry, so an unwanted overwrite changes them.
-  // [3:2] rides along as ordinary payload too; only a header's VC_ID means
-  // anything, and it comes from the sideband (assumption D3).
-  function automatic logic [31:0] mk_body(input logic [17:0] tag);
-    logic [31:0] f;
-    f      = '0;
-    f[1:0] = FLIT_BODY;
-    f[31:2] = {tag, 12'h201};   // payload, [13:10] = DIR_EAST
-    return f;
-  endfunction
-
-  function automatic logic [31:0] mk_tail(input logic [17:0] tag);
-    logic [31:0] f;
-    f      = '0;
-    f[1:0] = FLIT_TAIL;
-    f[31:2] = {tag, 12'h401};   // payload, [13:10] = DIR_WEST
-    return f;
-  endfunction
 
   //---------------------------------------------------------------
   // 8. Receiver: log everything that leaves the router
@@ -229,7 +182,7 @@ module tb_router_top;
   typedef struct {
     int          port;
     int          vc;
-    logic [31:0] data;
+    logic [FLIT_W-1:0] data;
   } rx_t;
 
   rx_t rx[$];
@@ -258,33 +211,35 @@ module tb_router_top;
     return rx.size();
   endfunction
 
-  // Payload tag of received flit i -- the [31:14] field heads and
+  // Payload tag of received flit i -- the reserved upper region heads and
   // HEAD_TAILs carry, which is what every packet in this bench is
   // identified by.
-  function automatic logic [17:0] rx_tag(input int i);
-    return rx[i].data[31:14];
+  function automatic logic [TAG_W-1:0] rx_tag(input int i);
+    return flit_tag(rx[i].data);
   endfunction
 
   function automatic logic [1:0] rx_type(input int i);
-    return rx[i].data[1:0];
+    return flit_type(rx[i].data);
   endfunction
 
-  // Which port the packet came from, encoded in the tag's top two bits
-  // (i.e. bits [31:30] of the payload). A router only reports the output
-  // port it used, so attribution has to be carried in the data itself.
+  // Which port the packet came from. The bench borrows the header's BURST
+  // slot -- the top two bits of the 18-bit tag it writes -- because a router
+  // only reports the output port it used, so attribution has to ride in the
+  // data itself. A router never reads BURST (section 3.2), which is exactly
+  // what makes it free to borrow.
   function automatic logic [1:0] rx_origin(input int i);
-    return rx[i].data[31:30];
+    return flit_burst(rx[i].data);
   endfunction
 
   function automatic int rx_port(input int i);
     return rx[i].port;
   endfunction
 
-  // The route field of an arriving header: [13:10]. A single router never
-  // consumes its own outgoing route field, so this is how the header merge
-  // (the lookup a downstream router will do) is observed from outside.
+  // The route field of an arriving header. A single router never consumes
+  // its own outgoing route field, so this is how the header merge (the
+  // lookup a downstream router will do) is observed from outside.
   function automatic logic [3:0] rx_route(input int i);
-    return rx[i].data[13:10];
+    return flit_route(rx[i].data);
   endfunction
 
   //---------------------------------------------------------------
@@ -320,7 +275,7 @@ module tb_router_top;
         // the sideband is 2 bits wide while the row index is clog2(NUM_VC)
         // wide, and an out-of-range value would select past the end.
         for (int k = 0; k < NUM_VC; k++) begin
-          if (out_flit_valid[o] && (out_vc_id[o] == 2'(k))) cr_pipe[0][o][k] <= 1'b1;
+          if (out_flit_valid[o] && (out_vc_id[o] == VC_W'(k))) cr_pipe[0][o][k] <= 1'b1;
         end
       end
       for (int i = 1; i <= CRED_LAT; i++) begin
@@ -372,8 +327,8 @@ module tb_router_top;
   // real link needs anyway.
   typedef struct {
     int          port;
-    logic [1:0]  vc;
-    logic [31:0] data;
+    logic [VC_W-1:0] vc;
+    logic [FLIT_W-1:0] data;
   } tx_t;
 
   tx_t tx_q[$];
@@ -389,7 +344,7 @@ module tb_router_top;
   end
 
   // Push a flit onto a port's incoming link queue.
-  task automatic send(input int port, input logic [31:0] data, input logic [1:0] vc);
+  task automatic send(input int port, input logic [FLIT_W-1:0] data, input logic [VC_W-1:0] vc);
     tx_t t;
     // The guard reads the whole 32-bit index rather than letting it decay
     // into an array subscript, and it turns a mistyped port number in a
@@ -514,7 +469,7 @@ module tb_router_top;
     clear_rx();
 
     // (a) LOCAL -> EAST: dest (2,1) is east of (1,1).
-    send(LOCAL_IDX, mk_ht(3'd2, 3'd1, DIR_EAST, 2'd0, 18'h1_A11A), 2'd0);
+    send(LOCAL_IDX, mk_ht(3'd2, 3'd1, DIR_EAST, 2'd0, 18'h1_A11A), VC_W'(0));
     drain(200);
 
     check("T1a flit count", rx_n(), 1);
@@ -534,7 +489,7 @@ module tb_router_top;
     clear_rx();
 
     // (b) EAST -> WEST: arrived on the east link, header says exit WEST.
-    send(EAST_IDX, mk_ht(3'd0, 3'd1, DIR_WEST, 2'd0, 18'h1_B22B), 2'd0);
+    send(EAST_IDX, mk_ht(3'd0, 3'd1, DIR_WEST, 2'd0, 18'h1_B22B), VC_W'(0));
     drain(200);
 
     check("T1b flit count", rx_n(), 1);
@@ -550,7 +505,7 @@ module tb_router_top;
     // or an ejection, so the exit port is the one directly opposite the
     // input. Dest (1,2) is south of (1,1); the header's ROUTE field is what
     // selects it, since this flit arrived on a directional port.
-    send(NORTH_IDX, mk_ht(3'd1, 3'd2, DIR_SOUTH, 2'd0, 18'h1_C33C), 2'd0);
+    send(NORTH_IDX, mk_ht(3'd1, 3'd2, DIR_SOUTH, 2'd0, 18'h1_C33C), VC_W'(0));
     drain(200);
 
     check("T1c flit count", rx_n(), 1);
@@ -579,9 +534,9 @@ module tb_router_top;
   task automatic t2_three_flit_packet();
     int n0;
     int n1;
-    logic [17:0] tag;
-    logic [31:0] sent_body;
-    logic [31:0] sent_tail;
+    logic [FLIT_W-15:0] tag;
+    logic [FLIT_W-1:0] sent_body;
+    logic [FLIT_W-1:0] sent_tail;
     tag = 18'h2_3F17;
 
     clear_rx();
@@ -592,9 +547,9 @@ module tb_router_top;
     // protected from: with a destination right at the next router the
     // lookahead would be DIR_LOCAL and a merge applied to every flit would
     // rewrite them with the value they already carry.
-    send(EAST_IDX, mk_head(3'd0, 3'd2, DIR_WEST, 2'd0, tag), 2'd0);
-    send(EAST_IDX, mk_body(tag), 2'd0);
-    send(EAST_IDX, mk_tail(tag), 2'd0);
+    send(EAST_IDX, mk_head(3'd0, 3'd2, DIR_WEST, 2'd0, tag), VC_W'(0));
+    send(EAST_IDX, mk_body(tag), VC_W'(0));
+    send(EAST_IDX, mk_tail(tag), VC_W'(0));
 
     // Wait for the first flit to leave, measuring from the cycle the head
     // was actually put on the link.
@@ -655,11 +610,11 @@ module tb_router_top;
   task automatic t3_back_to_back_packets();
     clear_rx();
 
-    send(EAST_IDX, mk_head(3'd0, 3'd1, DIR_WEST, 2'd0, 18'h3_AA01), 2'd0);
-    send(EAST_IDX, mk_body(18'h3_AA01), 2'd0);
-    send(EAST_IDX, mk_tail(18'h3_AA01), 2'd0);
-    send(EAST_IDX, mk_head(3'd0, 3'd1, DIR_WEST, 2'd0, 18'h3_BB02), 2'd0);
-    send(EAST_IDX, mk_tail(18'h3_BB02), 2'd0);
+    send(EAST_IDX, mk_head(3'd0, 3'd1, DIR_WEST, 2'd0, 18'h3_AA01), VC_W'(0));
+    send(EAST_IDX, mk_body(18'h3_AA01), VC_W'(0));
+    send(EAST_IDX, mk_tail(18'h3_AA01), VC_W'(0));
+    send(EAST_IDX, mk_head(3'd0, 3'd1, DIR_WEST, 2'd0, 18'h3_BB02), VC_W'(0));
+    send(EAST_IDX, mk_tail(18'h3_BB02), VC_W'(0));
     drain(400);
 
     check("T3 both packets arrived (5 flits)", rx_n(), 5);
@@ -690,13 +645,13 @@ module tb_router_top;
     clear_rx();
 
     // VC0 -> EAST, three flits.
-    send(WEST_IDX, mk_head(3'd2, 3'd1, DIR_EAST, 2'd0, 18'h4_C000), 2'd0);
-    send(WEST_IDX, mk_body(18'h4_C000), 2'd0);
-    send(WEST_IDX, mk_tail(18'h4_C000), 2'd0);
+    send(WEST_IDX, mk_head(3'd2, 3'd1, DIR_EAST, 2'd0, 18'h4_C000), VC_W'(0));
+    send(WEST_IDX, mk_body(18'h4_C000), VC_W'(0));
+    send(WEST_IDX, mk_tail(18'h4_C000), VC_W'(0));
     // VC1 -> NORTH, three flits.
-    send(WEST_IDX, mk_head(3'd1, 3'd2, DIR_NORTH, 2'd1, 18'h4_C111), 2'd1);
-    send(WEST_IDX, mk_body(18'h4_C111), 2'd1);
-    send(WEST_IDX, mk_tail(18'h4_C111), 2'd1);
+    send(WEST_IDX, mk_head(3'd1, 3'd2, DIR_NORTH, 2'd1, 18'h4_C111), VC_W'(1));
+    send(WEST_IDX, mk_body(18'h4_C111), VC_W'(1));
+    send(WEST_IDX, mk_tail(18'h4_C111), VC_W'(1));
     drain(400);
 
     check("T4 both VC streams arrived (6 flits)", rx_n(), 6);
@@ -775,13 +730,23 @@ module tb_router_top;
     // their top two bits so the receiver can attribute an arrival to the
     // port that sent it -- which is the only way to observe fairness from
     // outside the router.
-    send(NORTH_IDX, mk_head(3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h1_0001), 2'd0);
-    for (int i = 0; i < 4; i++) send(NORTH_IDX, mk_body(18'h1_0001), 2'd0);
-    send(NORTH_IDX, mk_tail(18'h1_0001), 2'd0);
+    //
+    // The two sides are deliberately NOT on the same input VC. Under a
+    // VC-matched allocator (linnea_v2 section 4.4) input VC v can only ever
+    // be reserved as output VC v, so a second packet arriving on VC0 while
+    // VC0's row is held would simply wait for the first to finish -- one
+    // stream after the other, and stage 2 would never see two requesters at
+    // once. Putting the second on VC1 is what lets both be allocated in the
+    // same cycle and genuinely contend from here down, which is the whole
+    // condition this test exists to create. (Before section 4.4 the separable
+    // VA did that remapping for us, which is why this used to read VC0.)
+    send(NORTH_IDX, mk_head(3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h1_0001), VC_W'(0));
+    for (int i = 0; i < 4; i++) send(NORTH_IDX, mk_body(18'h1_0001), VC_W'(0));
+    send(NORTH_IDX, mk_tail(18'h1_0001), VC_W'(0));
 
-    send(EAST_IDX, mk_head(3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h2_0002), 2'd0);
-    for (int i = 0; i < 4; i++) send(EAST_IDX, mk_body(18'h2_0002), 2'd0);
-    send(EAST_IDX, mk_tail(18'h2_0002), 2'd0);
+    send(EAST_IDX, mk_head(3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h2_0002), VC_W'(1));
+    for (int i = 0; i < 4; i++) send(EAST_IDX, mk_body(18'h2_0002), VC_W'(1));
+    send(EAST_IDX, mk_tail(18'h2_0002), VC_W'(1));
 
     drain(600);
 
@@ -830,11 +795,11 @@ module tb_router_top;
   task automatic t6_va_contention();
     clear_rx();
 
-    send(NORTH_IDX, mk_head(3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h6_A0FF), 2'd0);
-    send(NORTH_IDX, mk_tail(18'h6_A0FF), 2'd0);
-    send(EAST_IDX,  mk_head(3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h6_B0FF), 2'd0);
-    send(EAST_IDX,  mk_tail(18'h6_B0FF), 2'd0);
-    send(WEST_IDX,  mk_ht  (3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h6_C1EE), 2'd0);
+    send(NORTH_IDX, mk_head(3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h6_A0FF), VC_W'(0));
+    send(NORTH_IDX, mk_tail(18'h6_A0FF), VC_W'(0));
+    send(EAST_IDX,  mk_head(3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h6_B0FF), VC_W'(0));
+    send(EAST_IDX,  mk_tail(18'h6_B0FF), VC_W'(0));
+    send(WEST_IDX,  mk_ht  (3'd1, 3'd1, DIR_LOCAL, 2'd0, 18'h6_C1EE), VC_W'(0));
     drain(600);
 
     // Total: 2 + 2 + 1 = 5 flits (N: H+T, E: H+T, W: HEAD_TAIL).
@@ -885,7 +850,7 @@ module tb_router_top;
     clear_rx();
 
     for (int i = 0; i < FIFO_DEPTH + 4; i++) begin
-      send(LOCAL_IDX, mk_ht(3'd2, 3'd1, DIR_EAST, 2'd0, 18'(18'h7_0000 + i)), 2'd0);
+      send(LOCAL_IDX, mk_ht(3'd2, 3'd1, DIR_EAST, 2'd0, 18'(18'h7_0000 + i)), VC_W'(0));
     end
 
     // Let it run long enough that any over-grant would have happened.
@@ -938,9 +903,9 @@ module tb_router_top;
     // the link back to back. That is what guarantees the collision: when
     // flit 0 is granted, flit 1 is already in the FIFO and must be fetched
     // in the very same cycle.
-    send(EAST_IDX, mk_head(3'd0, 3'd1, DIR_WEST, 2'd0, 18'h8_C011), 2'd0);
-    send(EAST_IDX, mk_body(18'h8_C011), 2'd0);
-    send(EAST_IDX, mk_tail(18'h8_C011), 2'd0);
+    send(EAST_IDX, mk_head(3'd0, 3'd1, DIR_WEST, 2'd0, 18'h8_C011), VC_W'(0));
+    send(EAST_IDX, mk_body(18'h8_C011), VC_W'(0));
+    send(EAST_IDX, mk_tail(18'h8_C011), VC_W'(0));
 
     // Walk to the cycle where the head appears on the output link.
     n = 0;
@@ -951,7 +916,7 @@ module tb_router_top;
     check_true("T8 the head reached the output link",
                out_flit_valid[WEST_IDX] === 1'b1);
     lat_first = n;
-    check("T8 the head is the first flit out", out_flit_data[WEST_IDX][1:0],
+    check("T8 the head is the first flit out", flit_type(out_flit_data[WEST_IDX]),
           FLIT_HEAD);
 
     // From here, the BODY and the TAIL must follow on the very next two
@@ -961,13 +926,13 @@ module tb_router_top;
     // somewhere in these next two samples.
     @(negedge clk);
     check("T8 BODY on the very next cycle", out_flit_valid[WEST_IDX], 1'b1);
-    check("T8 BODY payload is from the same packet", out_flit_data[WEST_IDX][31:14],
+    check("T8 BODY payload is from the same packet", flit_tag(out_flit_data[WEST_IDX]),
           18'h8_C011);
-    check("T8 BODY type", out_flit_data[WEST_IDX][1:0], FLIT_BODY);
+    check("T8 BODY type", flit_type(out_flit_data[WEST_IDX]), FLIT_BODY);
 
     @(negedge clk);
     check("T8 TAIL on the cycle after that", out_flit_valid[WEST_IDX], 1'b1);
-    check("T8 TAIL type", out_flit_data[WEST_IDX][1:0], FLIT_TAIL);
+    check("T8 TAIL type", flit_type(out_flit_data[WEST_IDX]), FLIT_TAIL);
 
     // And the arrival log agrees that exactly three left -- no duplicates
     // from a double fetch. One more cycle first: the logger samples at the
@@ -997,7 +962,7 @@ module tb_router_top;
     int lat;
 
     clear_rx();
-    send(LOCAL_IDX, mk_ht(3'd2, 3'd1, DIR_EAST, 2'd0, 18'h9_B995), 2'd0);
+    send(LOCAL_IDX, mk_ht(3'd2, 3'd1, DIR_EAST, 2'd0, 18'h9_B995), VC_W'(0));
 
     // Both ends of the hop are sampled at the posedge that closes each
     // cycle -- the same edge the RX logger uses, so both readings are "the
@@ -1048,8 +1013,8 @@ module tb_router_top;
     // HAS_WEST = 0 a packet bound for (2,1) still leaves via EAST and one
     // bound for (1,0) still leaves via NORTH.
     clear_rx();
-    send(LOCAL_IDX, mk_ht(3'd2, 3'd1, DIR_EAST, 2'd0, 18'hA_0001), 2'd0);
-    send(LOCAL_IDX, mk_ht(3'd1, 3'd0, DIR_NORTH, 2'd0, 18'hA_0002), 2'd0);
+    send(LOCAL_IDX, mk_ht(3'd2, 3'd1, DIR_EAST, 2'd0, 18'hA_0001), VC_W'(0));
+    send(LOCAL_IDX, mk_ht(3'd1, 3'd0, DIR_NORTH, 2'd0, 18'hA_0002), VC_W'(0));
     drain(300);
     check("E1 both edge-legal packets arrived", rx_n(), 2);
     if (rx_n() >= 2) begin

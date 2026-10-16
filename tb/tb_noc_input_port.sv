@@ -9,9 +9,11 @@
 //
 //   VA  - combinational accept in the request cycle (spec section 1.1: "the
 //         allocator is combinational in the request cycle; the input port
-//         latches assignment_valid at the clock edge"). Output VC is chosen
-//         round-robin per input VC so out_vc capture gets exercised with more
-//         than one value.
+//         latches assignment_valid at the clock edge"). There is no output VC
+//         for it to choose: linnea_v2 section 4.4 matches input VC v to
+//         output VC v, so the grant IS the index and the port has nothing
+//         to capture. (It used to round-robin one, purely to exercise a
+//         register that no longer exists.)
 //   SA  - one round-robin pick across this port's requesting VCs, granted
 //         immediately. This collapses the real arbiter's stage 2 (which here
 //         has only one client) but keeps the property the input port cares
@@ -56,12 +58,20 @@
 
 module tb_noc_input_port;
 
-  localparam int NUM_VC = 2;
+  // Flit field model and the shared reporter (see noc_tb_pkg.sv).
+  import noc_tb_pkg::*;
 
-  localparam logic [1:0] FLIT_BODY      = 2'b00;
-  localparam logic [1:0] FLIT_HEAD      = 2'b01;
-  localparam logic [1:0] FLIT_TAIL      = 2'b10;
-  localparam logic [1:0] FLIT_HEAD_TAIL = 2'b11;
+  // FLIT_W is owned by noc_tb_pkg.
+
+  parameter  int NUM_VC = 4;
+  // Buffer depth per VC (linnea_v2 section 1). Named FIFO_DEPTH rather than
+  // DEPTH so that one -GFIFO_DEPTH= switch sweeps every bench in the suite.
+  parameter  int FIFO_DEPTH = 4;
+  // VC index width (linnea_v2 section 1): derived rather than independent,
+  // so a sideband can never be narrower than the index it carries.
+  localparam int VC_W   = (NUM_VC > 1) ? $clog2(NUM_VC) : 1;
+
+  // FLIT_HEAD / FLIT_BODY / FLIT_TAIL / FLIT_HEAD_TAIL come from the package.
 
   localparam logic [3:0] DIR_LOCAL = 4'b0000;
   localparam logic [3:0] DIR_NORTH = 4'b0001;
@@ -75,22 +85,24 @@ module tb_noc_input_port;
   localparam realtime CLK_PERIOD = 10ns;
   localparam realtime SETTLE     = 1ns;  // after negedge, let comb logic settle
 
-  int errors = 0;
-  int checks = 0;
+  // `errors` and `checks` come from noc_tb_pkg -- deliberately the same
+  // counters every other bench reports from, even though this file keeps its
+  // own narrower check tasks below (chk_vc, chk_vec, ...) rather than the
+  // package's single wide `check()`.
 
   //---------------------------------------------------------------------------
   // Check tasks
   //
-  // One family per value width rather than one 32-bit task taking everything.
+  // One family per value kind rather than one wide task taking everything.
   // Passing a 4-bit direction to a 32-bit formal is a silent zero-extension
   // that linters flag (WIDTHEXPAND) and that hides real width mistakes, so
   // every wrapper widens explicitly and only where it means to.
   //
-  // All four funnel into `report`, which owns the pass/fail bookkeeping.
+  // All five funnel into `report`, which owns the pass/fail bookkeeping.
   //---------------------------------------------------------------------------
 
-  task automatic report(input string name, input logic [31:0] actual,
-                        input logic [31:0] expected);
+  task automatic report(input string name, input logic [FLIT_W-1:0] actual,
+                        input logic [FLIT_W-1:0] expected);
     checks++;
     if (actual !== expected) begin
       errors++;
@@ -102,55 +114,64 @@ module tb_noc_input_port;
     end
   endtask
 
-  // 32-bit: flits, grant counters.
-  task automatic chk(input string n, input logic [31:0] a, input logic [31:0] e);
+  // Flits and grant counters.
+  task automatic chk(input string n, input logic [FLIT_W-1:0] a, input logic [FLIT_W-1:0] e);
     report(n, a, e);
   endtask
 
-  // 4-bit: route directions.
+  // Route directions.
   task automatic chk4(input string n, input logic [3:0] a, input logic [3:0] e);
-    report(n, {28'd0, a}, {28'd0, e});
+    report(n, FLIT_W'(a), FLIT_W'(e));
   endtask
 
-  // 2-bit: VC indices and packed per-VC request vectors.
-  task automatic chk2(input string n, input logic [1:0] a, input logic [1:0] e);
-    report(n, {30'd0, a}, {30'd0, e});
+  // A packed per-VC vector (request, credit return, single/last flags): one
+  // bit per VC with VC0 in bit 0. An expectation written as a small literal
+  // therefore still reads naturally -- `2'b01` means "VC0 and nobody else",
+  // and anything set above bit 1 shows up as a mismatch instead of being
+  // quietly dropped by a 2-bit formal.
+  task automatic chk_vec(input string n, input logic [NUM_VC-1:0] a,
+                         input logic [NUM_VC-1:0] e);
+    report(n, FLIT_W'(a), FLIT_W'(e));
   endtask
 
-  // 1-bit: flags.
+  // One VC index -- the downstream VC a packet was assigned. Clog2(NUM_VC)
+  // bits wide, which is why it cannot share chk_vec: a vector over the VCs
+  // and an index into those VCs are the same width only by accident, and
+  // only at NUM_VC = 2.
+  task automatic chk_vc(input string n, input logic [VC_W-1:0] a,
+                        input logic [VC_W-1:0] e);
+    report(n, FLIT_W'(a), FLIT_W'(e));
+  endtask
+
+  // Flags.
   task automatic chk_bit(input string n, input logic a, input logic e);
-    report(n, {31'd0, a}, {31'd0, e});
+    report(n, FLIT_W'(a), FLIT_W'(e));
   endtask
 
   //---------------------------------------------------------------------------
-  // Flit constructors -- one place that knows the bit layout, so the tests
-  // read as packets rather than as concatenations.
+  // Flit constructors
+  //
+  // The field map moved to noc_tb_pkg. What stays here is only the argument
+  // order these tests were written against -- so the tests still read as
+  // packets rather than as concatenations, and there is exactly one file
+  // left that knows where a field lives.
   //---------------------------------------------------------------------------
 
   // HEAD / HEAD_TAIL carry routing metadata.
-  function automatic logic [31:0] mk_head(input logic [1:0] ftype,
+  //
+  // A local-port injection header: no identity tag (this bench's packets are
+  // recognised by their payload, not by a tag), and KIND fixed to WR_REQ
+  // because no router reads it (assumption D3). It must not grow a slice of
+  // its own.
+  function automatic logic [FLIT_W-1:0] mk_head(input logic [1:0] ftype,
                                           input logic [3:0] route,
                                           input logic [2:0] dest_y,
                                           input logic [2:0] dest_x);
-    logic [31:0] f;
-    f = '0;
-    f[13:10] = route;   // ROUTE: this router's exit port (relay ports only)
-    f[9:7]   = dest_y;
-    f[6:4]   = dest_x;
-    f[3:2]   = 2'b00;   // VC_ID -- ignored by routers (assumption D3)
-    f[1:0]   = ftype;
-    return f;
+    return mk_hdr(ftype, KIND_WR_REQ, route, dest_y, dest_x, '0);
   endfunction
 
-  // BODY / TAIL carry payload only.
-  function automatic logic [31:0] mk_payload(input logic [1:0] ftype,
-                                             input logic [29:0] payload);
-    logic [31:0] f;
-    f = '0;
-    f[31:2] = payload;
-    f[1:0]  = ftype;
-    return f;
-  endfunction
+  // BODY / TAIL carry payload only -- noc_tb_pkg.mk_payload fills everything
+  // above the type field.
 
   //---------------------------------------------------------------------------
   // Clock / reset
@@ -172,9 +193,9 @@ module tb_noc_input_port;
   //===========================================================================
   // DUT 1: directional (relay) input port -- route comes from the header
   //===========================================================================
-  logic [31:0] r_flt_data;
+  logic [FLIT_W-1:0] r_flt_data;
   logic        r_flt_valid;
-  logic [1:0]  r_vc_id;
+  logic [VC_W-1:0]  r_vc_id;
 
   logic [NUM_VC-1:0] r_credit;
 
@@ -182,20 +203,20 @@ module tb_noc_input_port;
   logic [3:0]        r_va_req_out_port [NUM_VC];
   logic [NUM_VC-1:0] r_va_req_single;
   logic [NUM_VC-1:0] r_va_gnt;
-  logic [1:0]        r_va_gnt_out_vc [NUM_VC];
 
   logic [NUM_VC-1:0] r_req_sa;
   logic [3:0]        r_sa_req_out_port [NUM_VC];
-  logic [1:0]        r_sa_req_out_vc [NUM_VC];
+  logic [VC_W-1:0]        r_sa_req_out_vc [NUM_VC];
   logic [NUM_VC-1:0] r_sa_req_last;
   logic [NUM_VC-1:0] r_sa_gnt;
   logic [NUM_VC-1:0] r_sa_pick;
 
-  logic [31:0] r_st_flit_data;
+  logic [FLIT_W-1:0] r_st_flit_data;
   logic [3:0]  r_st_route_next;
 
   noc_input_port #(
       .NUM_VC        (NUM_VC),
+      .DEPTH         (FIFO_DEPTH),
       .CUR_X         (CUR_X),
       .CUR_Y         (CUR_Y),
       .IS_LOCAL_PORT (0)
@@ -213,7 +234,6 @@ module tb_noc_input_port;
       .va_req_out_port     (r_va_req_out_port),
       .va_req_single       (r_va_req_single),
       .va_gnt              (r_va_gnt),
-      .va_gnt_out_vc       (r_va_gnt_out_vc),
 
       .req_sa              (r_req_sa),
       .sa_req_out_port     (r_sa_req_out_port),
@@ -227,7 +247,6 @@ module tb_noc_input_port;
   );
 
   logic [NUM_VC-1:0] r_m_va_gnt, r_m_sa_gnt, r_m_sa_pick;
-  logic [1:0]        r_m_va_out_vc [NUM_VC];
   int unsigned       r_n_va, r_n_sa;
 
   mock_arbiter #(.NUM_VC(NUM_VC)) u_relay_mock (
@@ -235,7 +254,6 @@ module tb_noc_input_port;
       .rst_n         (rst_n),
       .va_req        (r_req_va),
       .va_gnt        (r_m_va_gnt),
-      .va_gnt_out_vc (r_m_va_out_vc),
       .sa_req        (r_req_sa),
       .sa_gnt        (r_m_sa_gnt),
       .sa_pick       (r_m_sa_pick),
@@ -250,13 +268,10 @@ module tb_noc_input_port;
     r_va_gnt   = r_m_va_gnt;
     r_sa_gnt   = r_m_sa_gnt;
     r_sa_pick  = r_m_sa_pick;
-    for (int v = 0; v < NUM_VC; v++) begin
-      r_va_gnt_out_vc[v] = r_m_va_out_vc[v];
-    end
   end
 
   // Drive helper for the relay port.
-  task automatic r_step(input logic [31:0] d, input logic v, input logic [1:0] vc);
+  task automatic r_step(input logic [FLIT_W-1:0] d, input logic v, input logic [VC_W-1:0] vc);
     @(negedge clk);
     r_flt_data  = d;
     r_flt_valid = v;
@@ -265,15 +280,15 @@ module tb_noc_input_port;
   endtask
 
   task automatic r_idle();
-    r_step(32'h0, 1'b0, 2'd0);
+    r_step(32'h0, 1'b0, VC_W'(0));
   endtask
 
   //===========================================================================
   // DUT 2: LOCAL input port -- route is computed from the destination
   //===========================================================================
-  logic [31:0] l_flt_data;
+  logic [FLIT_W-1:0] l_flt_data;
   logic        l_flt_valid;
-  logic [1:0]  l_vc_id;
+  logic [VC_W-1:0]  l_vc_id;
 
   logic [NUM_VC-1:0] l_credit;
 
@@ -281,20 +296,20 @@ module tb_noc_input_port;
   logic [3:0]        l_va_req_out_port [NUM_VC];
   logic [NUM_VC-1:0] l_va_req_single;
   logic [NUM_VC-1:0] l_va_gnt;
-  logic [1:0]        l_va_gnt_out_vc [NUM_VC];
 
   logic [NUM_VC-1:0] l_req_sa;
   logic [3:0]        l_sa_req_out_port [NUM_VC];
-  logic [1:0]        l_sa_req_out_vc [NUM_VC];
+  logic [VC_W-1:0]        l_sa_req_out_vc [NUM_VC];
   logic [NUM_VC-1:0] l_sa_req_last;
   logic [NUM_VC-1:0] l_sa_gnt;
   logic [NUM_VC-1:0] l_sa_pick;
 
-  logic [31:0] l_st_flit_data;
+  logic [FLIT_W-1:0] l_st_flit_data;
   logic [3:0]  l_st_route_next;
 
   noc_input_port #(
       .NUM_VC        (NUM_VC),
+      .DEPTH         (FIFO_DEPTH),
       .CUR_X         (CUR_X),
       .CUR_Y         (CUR_Y),
       .IS_LOCAL_PORT (1)
@@ -312,7 +327,6 @@ module tb_noc_input_port;
       .va_req_out_port     (l_va_req_out_port),
       .va_req_single       (l_va_req_single),
       .va_gnt              (l_va_gnt),
-      .va_gnt_out_vc       (l_va_gnt_out_vc),
 
       .req_sa              (l_req_sa),
       .sa_req_out_port     (l_sa_req_out_port),
@@ -326,7 +340,6 @@ module tb_noc_input_port;
   );
 
   logic [NUM_VC-1:0] l_m_va_gnt, l_m_sa_gnt, l_m_sa_pick;
-  logic [1:0]        l_m_va_out_vc [NUM_VC];
   int unsigned       l_n_va, l_n_sa;
 
   mock_arbiter #(.NUM_VC(NUM_VC)) u_local_mock (
@@ -334,7 +347,6 @@ module tb_noc_input_port;
       .rst_n         (rst_n),
       .va_req        (l_req_va),
       .va_gnt        (l_m_va_gnt),
-      .va_gnt_out_vc (l_m_va_out_vc),
       .sa_req        (l_req_sa),
       .sa_gnt        (l_m_sa_gnt),
       .sa_pick       (l_m_sa_pick),
@@ -346,12 +358,9 @@ module tb_noc_input_port;
     l_va_gnt   = l_m_va_gnt;
     l_sa_gnt   = l_m_sa_gnt;
     l_sa_pick  = l_m_sa_pick;
-    for (int v = 0; v < NUM_VC; v++) begin
-      l_va_gnt_out_vc[v] = l_m_va_out_vc[v];
-    end
   end
 
-  task automatic l_step(input logic [31:0] d, input logic v, input logic [1:0] vc);
+  task automatic l_step(input logic [FLIT_W-1:0] d, input logic v, input logic [VC_W-1:0] vc);
     @(negedge clk);
     l_flt_data  = d;
     l_flt_valid = v;
@@ -360,7 +369,7 @@ module tb_noc_input_port;
   endtask
 
   task automatic l_idle();
-    l_step(32'h0, 1'b0, 2'd0);
+    l_step(32'h0, 1'b0, VC_W'(0));
   endtask
 
 
@@ -375,14 +384,14 @@ module tb_noc_input_port;
     $display("--- T0: idle after reset ---");
     do_reset();
 
-    chk2("T0 req_va",            r_req_va,  '0);
-    chk2("T0 req_sa",            r_req_sa,  '0);
-    chk2("T0 credit_return",     r_credit,  '0);
+    chk_vec("T0 req_va",            r_req_va,  '0);
+    chk_vec("T0 req_sa",            r_req_sa,  '0);
+    chk_vec("T0 credit_return",     r_credit,  '0);
     chk("T0 st_flit_data",      r_st_flit_data, '0);
     chk4("T0 st_route_next",     r_st_route_next, '0);
-    chk2("T0 va_req_single",     r_va_req_single, '0);
-    chk2("T0 sa_req_last",       r_sa_req_last, '0);
-    chk2("T0 local req_va",      l_req_va,  '0);
+    chk_vec("T0 va_req_single",     r_va_req_single, '0);
+    chk_vec("T0 sa_req_last",       r_sa_req_last, '0);
+    chk_vec("T0 local req_va",      l_req_va,  '0);
   endtask
 
 
@@ -402,7 +411,7 @@ module tb_noc_input_port;
   // after the read, assumption D4).
   //===========================================================================
   task automatic test_T9_bypass();
-    logic [31:0] pkt;
+    logic [FLIT_W-1:0] pkt;
 
     $display("--- T9: empty-FIFO bypass ---");
     do_reset();
@@ -410,7 +419,7 @@ module tb_noc_input_port;
     pkt = mk_head(FLIT_HEAD_TAIL, DIR_WEST, 3'd1, 3'd1);
 
     // ---- c0: flit lands on an empty link ----
-    r_step(pkt, 1'b1, 2'd0);
+    r_step(pkt, 1'b1, VC_W'(0));
 
     chk_bit("T9 c0 req_va (not yet)",      r_req_va[0], 1'b0);
     chk_bit("T9 c0 credit_return (c1 too)", r_credit[0], 1'b0);
@@ -463,7 +472,7 @@ module tb_noc_input_port;
   // per cycle per VC.
   //===========================================================================
   task automatic test_T2_three_flit();
-    logic [31:0] H, B, T;
+    logic [FLIT_W-1:0] H, B, T;
     logic [3:0]   exp_route_next;
 
     $display("--- T2: 3-flit packet, spec section 3 timeline ---");
@@ -478,11 +487,11 @@ module tb_noc_input_port;
     exp_route_next = DIR_WEST;
 
     // ---- c0 ----
-    r_step(H, 1'b1, 2'd0);
+    r_step(H, 1'b1, VC_W'(0));
     chk_bit("T2 c0 req_va (H not fetched yet)", r_req_va[0], 1'b0);
 
     // ---- c1 ----
-    r_step(B, 1'b1, 2'd0);
+    r_step(B, 1'b1, VC_W'(0));
     chk_bit("T2 c1 req_va",             r_req_va[0], 1'b1);
     chk4("T2 c1 va_req_out_port (live)",  r_va_req_out_port[0], DIR_WEST);
     chk_bit("T2 c1 va_req_single",       r_va_req_single[0], 1'b0);  // HEAD, not HT
@@ -490,10 +499,10 @@ module tb_noc_input_port;
     chk_bit("T2 c1 req_sa (VA pending)", r_req_sa[0], 1'b0);
 
     // ---- c2 : grant #1, H switches ----
-    r_step(T, 1'b1, 2'd0);
+    r_step(T, 1'b1, VC_W'(0));
     chk_bit("T2 c2 req_sa",              r_req_sa[0], 1'b1);
     chk4("T2 c2 sa_req_out_port",         r_sa_req_out_port[0], DIR_WEST);
-    chk2("T2 c2 sa_req_out_vc",           r_sa_req_out_vc[0], 2'd0);  // mock's first pick
+    chk_vc("T2 c2 sa_req_out_vc",           r_sa_req_out_vc[0], VC_W'(0));  // mock's first pick
     chk_bit("T2 c2 sa_req_last",         r_sa_req_last[0], 1'b0);    // H is not last
     chk_bit("T2 c2 sa_gnt",              r_sa_gnt[0], 1'b1);
     chk_bit("T2 c2 sa_pick",             r_sa_pick[0], 1'b1);
@@ -549,7 +558,7 @@ module tb_noc_input_port;
   // rule rather than the `!fifo_empty` half.
   //===========================================================================
   task automatic test_T8_collision();
-    logic [31:0] H, T;
+    logic [FLIT_W-1:0] H, T;
 
     $display("--- T8: fetch and grant in the same cycle ---");
     do_reset();
@@ -558,7 +567,7 @@ module tb_noc_input_port;
     T = mk_payload(FLIT_TAIL, 30'h3333_3333);
 
     // ---- c0 ----
-    r_step(H, 1'b1, 2'd0);
+    r_step(H, 1'b1, VC_W'(0));
     chk_bit("T8 c0 req_va", r_req_va[0], 1'b0);
 
     // ---- c1 : VA request, no link traffic so the FIFO stays empty ----
@@ -568,7 +577,7 @@ module tb_noc_input_port;
     chk_bit("T8 c1 req_sa",           r_req_sa[0], 1'b0);
 
     // ---- c2 : GRANT for H, and T arrives on an empty FIFO in the same cycle
-    r_step(T, 1'b1, 2'd0);
+    r_step(T, 1'b1, VC_W'(0));
     chk_bit("T8 c2 sa_gnt",           r_sa_gnt[0], 1'b1);
     chk("T8 c2 st_flit_data (H)",     r_st_flit_data, H);
     chk_bit("T8 c2 sa_req_last",      r_sa_req_last[0], 1'b0);
@@ -609,7 +618,7 @@ module tb_noc_input_port;
   //              va_req_out_port can read EAST is the live mux.
   //===========================================================================
   task automatic test_R1_route_capture();
-    logic [31:0] p1, p2;
+    logic [FLIT_W-1:0] p1, p2;
 
     $display("--- R1: route capture + live VA output-port mux ---");
     do_reset();
@@ -618,7 +627,7 @@ module tb_noc_input_port;
     p2 = mk_head(FLIT_HEAD_TAIL, DIR_EAST,  3'd3, 3'd5);
 
     // ---- packet 1: NORTH ----
-    r_step(p1, 1'b1, 2'd0);                       // c0: arrive next cycle
+    r_step(p1, 1'b1, VC_W'(0));                       // c0: arrive next cycle
 
     r_idle();                                     // c1
     chk4("R1 c1 pkt1 va_req_out_port", r_va_req_out_port[0], DIR_NORTH);
@@ -629,7 +638,7 @@ module tb_noc_input_port;
     chk_bit("R1 c2 sa_gnt",           r_sa_gnt[0], 1'b1);
 
     // ---- packet 2: EAST, arriving into a VC whose out_port still says NORTH
-    r_step(p2, 1'b1, 2'd0);                       // c3: pkt2 on link, pkt1 done
+    r_step(p2, 1'b1, VC_W'(0));                       // c3: pkt2 on link, pkt1 done
 
     r_idle();                                     // c4: pkt2 arrival cycle
     chk4("R1 c4 pkt2 va_req_out_port (LIVE, not stale NORTH)", r_va_req_out_port[0], DIR_EAST);
@@ -658,7 +667,7 @@ module tb_noc_input_port;
   // instead of being derived from meaningless next-hop coordinates.
   //===========================================================================
   task automatic test_L1_local_port();
-    logic [31:0] pkt;
+    logic [FLIT_W-1:0] pkt;
 
     $display("--- L1: LOCAL port route compute ---");
     do_reset();
@@ -667,20 +676,28 @@ module tb_noc_input_port;
     // ROUTE is deliberately poisoned with X: a local port must never look at
     // it (it has no upstream header), so the value has to be irrelevant.
     pkt = mk_head(FLIT_HEAD_TAIL, 4'bxxxx, 3'd3, 3'd5);
-    l_step(pkt, 1'b1, 2'd0);
+    l_step(pkt, 1'b1, VC_W'(0));
 
     l_idle();                                       // c1: arrival
     chk4("L1 east va_req_out_port (LIVE)",  l_va_req_out_port[0], DIR_EAST);
     // Credit for the c0 bypass fetch, registered one cycle later (D4).
-    chk2("L1 east credit_return",           l_credit, 2'b01);
+    chk_vec("L1 east credit_return",           l_credit, 2'b01);
     // HEAD_TAIL, so VA sees the single-flit tier bit.
-    chk2("L1 east va_req_single",           l_va_req_single, 2'b01);
+    chk_vec("L1 east va_req_single",           l_va_req_single, 2'b01);
 
     l_idle();                                       // c2: latched, switching
     chk4("L1 east sa_req_out_port (LATCHED)", l_sa_req_out_port[0], DIR_EAST);
     chk_bit("L1 east sa_gnt",              l_sa_gnt[0], 1'b1);
-    chk2("L1 east sa_req_last",         l_sa_req_last, 2'b01);
-    chk2("L1 east sa_req_out_vc",          l_sa_req_out_vc[0], 2'd0);  // 1st grant
+    chk_vec("L1 east sa_req_last",         l_sa_req_last, 2'b01);
+    // The credit-mask index is this VC's own index -- linnea_v2 section 4.4.
+    // This check used to read back whatever the mock's round-robin allocator
+    // had handed the port on THIS grant (0, then 1, then 2), which was the
+    // point of the register that used to sit here: a separable allocator
+    // could hand out any downstream VC and the port had to remember it.
+    // With the assignment locked to the requester's own index there is no
+    // longer anything to remember, so all three reads below say 0 and say it
+    // because the packet is on VC0.
+    chk_vc("L1 east sa_req_out_vc",          l_sa_req_out_vc[0], VC_W'(0));
     chk("L1 east st_flit_data",            l_st_flit_data, pkt);
     // st_route_next is muxed by sa_pick, so it is only presented during the
     // grant cycle -- which is precisely when the output port merges it into
@@ -692,18 +709,18 @@ module tb_noc_input_port;
 
     // -- dest (3,5): X matches, Y grows downward -> SOUTH -------------------
     pkt = mk_head(FLIT_HEAD_TAIL, 4'bxxxx, 3'd5, 3'd3);
-    l_step(pkt, 1'b1, 2'd0);
+    l_step(pkt, 1'b1, VC_W'(0));
 
     l_idle();
     chk4("L1 south va_req_out_port (LIVE)", l_va_req_out_port[0], DIR_SOUTH);
-    chk2("L1 south credit_return",          l_credit, 2'b01);
-    chk2("L1 south va_req_single",          l_va_req_single, 2'b01);
+    chk_vec("L1 south credit_return",          l_credit, 2'b01);
+    chk_vec("L1 south va_req_single",          l_va_req_single, 2'b01);
 
     l_idle();
     chk4("L1 south sa_req_out_port",        l_sa_req_out_port[0], DIR_SOUTH);
     chk_bit("L1 south sa_gnt",             l_sa_gnt[0], 1'b1);
-    chk2("L1 south sa_req_last",        l_sa_req_last, 2'b01);
-    chk2("L1 south sa_req_out_vc",         l_sa_req_out_vc[0], 2'd1);  // 2nd grant
+    chk_vec("L1 south sa_req_last",        l_sa_req_last, 2'b01);
+    chk_vc("L1 south sa_req_out_vc",         l_sa_req_out_vc[0], VC_W'(0));  // still VC0's own pool
     chk("L1 south st_flit_data",           l_st_flit_data, pkt);
     // next hop (3,4) vs dest (3,5): still south.
     chk4("L1 south st_route_next",         l_st_route_next, DIR_SOUTH);
@@ -716,18 +733,18 @@ module tb_noc_input_port;
     // route_next must be forced LOCAL WITHOUT a second call on junk
     // next-hop coordinates.
     pkt = mk_head(FLIT_HEAD_TAIL, 4'bxxxx, CUR_Y, CUR_X);
-    l_step(pkt, 1'b1, 2'd0);
+    l_step(pkt, 1'b1, VC_W'(0));
 
     l_idle();
     chk4("L1 self va_req_out_port",         l_va_req_out_port[0], DIR_LOCAL);
-    chk2("L1 self credit_return",           l_credit, 2'b01);
-    chk2("L1 self va_req_single",           l_va_req_single, 2'b01);
+    chk_vec("L1 self credit_return",           l_credit, 2'b01);
+    chk_vec("L1 self va_req_single",           l_va_req_single, 2'b01);
 
     l_idle();
     chk4("L1 self sa_req_out_port",         l_sa_req_out_port[0], DIR_LOCAL);
     chk_bit("L1 self sa_gnt",              l_sa_gnt[0], 1'b1);
-    chk2("L1 self sa_req_last",         l_sa_req_last, 2'b01);
-    chk2("L1 self sa_req_out_vc",          l_sa_req_out_vc[0], 2'd0);  // wraps back
+    chk_vec("L1 self sa_req_last",         l_sa_req_last, 2'b01);
+    chk_vc("L1 self sa_req_out_vc",          l_sa_req_out_vc[0], VC_W'(0));  // VC0 again -- no allocator choice left to vary
     chk("L1 self st_flit_data",            l_st_flit_data, pkt);
     chk4("L1 self st_route_next",          l_st_route_next, DIR_LOCAL);
 
@@ -736,6 +753,17 @@ module tb_noc_input_port;
 
     chk("L1 total VA grants", 32'(l_n_va), 32'd3);
     chk("L1 total SA grants", 32'(l_n_sa), 32'd3);
+
+    // The three reads above all landed on VC0, so on their own they would
+    // also pass if the credit-mask index had collapsed to a constant zero --
+    // which is the failure mode this rule creates for itself now that nothing
+    // varies it. Stating it over every VC closes that gap: each index must be
+    // its own VC, and only an expression that actually carries `i` gets
+    // through. It is the surviving interface statement of section 4.5, since
+    // the allocator's own grant is no longer exported.
+    for (int v = 0; v < NUM_VC; v++)
+      chk_vc($sformatf("L1 sa_req_out_vc[%0d] is its own VC", v),
+             l_sa_req_out_vc[v], VC_W'(v));
   endtask
 
 
@@ -754,7 +782,7 @@ module tb_noc_input_port;
   // one cycle later.
   //===========================================================================
   task automatic test_V1_two_vc();
-    logic [31:0] f0, f1;
+    logic [FLIT_W-1:0] f0, f1;
 
     $display("--- V1: two VCs concurrently ---");
     do_reset();
@@ -763,10 +791,10 @@ module tb_noc_input_port;
     f1 = mk_head(FLIT_HEAD_TAIL, DIR_SOUTH, 3'd5, 3'd3);
 
     // ---- c0: VC0's packet ----
-    r_step(f0, 1'b1, 2'd0);
+    r_step(f0, 1'b1, VC_W'(0));
 
     // ---- c1: VC1's packet arrives while VC0 is sitting at the VA stage ----
-    r_step(f1, 1'b1, 2'd1);
+    r_step(f1, 1'b1, VC_W'(1));
     chk_bit("V1 c1 req_va[0] (VC0 at VA)",        r_req_va[0], 1'b1);
     chk4("V1 c1 VC0 va_req_out_port (LIVE)",       r_va_req_out_port[0], DIR_NORTH);
     chk_bit("V1 c1 req_sa[0] (VA not latched)",   r_req_sa[0], 1'b0);
@@ -817,9 +845,9 @@ module tb_noc_input_port;
   // Flits in this test: 6.
   //===========================================================================
   task automatic test_C1_credits();
-    logic [31:0] pkts[6];
+    logic [FLIT_W-1:0] pkts[6];
     int unsigned credits;
-    logic [31:0] n_before;
+    logic [FLIT_W-1:0] n_before;
 
     $display("--- C1: credit return accounting ---");
     do_reset();
@@ -840,7 +868,7 @@ module tb_noc_input_port;
     for (int k = 0; k < 6; k++) begin
       // Drive flit k during its cycle; its fetch (bypass) commits at the
       // edge that ends this cycle.
-      r_step(pkts[k], 1'b1, 2'(k % 2));
+      r_step(pkts[k], 1'b1, VC_W'(k % 2));
 
       // Advance one cycle: the registered credit for that fetch is now on
       // the wire, on the bit belonging to the VC that fetched.

@@ -83,11 +83,14 @@
 
 module router_top #(
     parameter int         NUM_PORTS     = 5,  // fixed by the 5x5 crossbar
-    parameter int         NUM_VC        = 2,  // fixed by section 1.1
+    parameter int         FLIT_W        = 40, // flit width (linnea_v2, sect 1)
+    parameter int         NUM_VC        = 4,  // default per linnea_v2 section 1
     parameter int         LOCAL_IDX     = 0,  // index of the LOCAL port
-    parameter int         FIFO_DEPTH    = 8,  // neighbour input FIFO depth --
+    parameter int         FIFO_DEPTH    = 4,  // neighbour input FIFO depth --
                                               // must equal noc_input_port's
-                                              // FIFO and arbiter DIR_CREDITS
+                                              // FIFO and arbiter DIR_CREDITS.
+                                              // It is passed to both, so the
+                                              // three cannot drift apart.
     parameter int         LOCAL_CREDITS = 4,  // NI receive buffer depth / VC
     parameter logic [2:0] CUR_X         = '0, // this router's coordinates
     parameter logic [2:0] CUR_Y         = '0,
@@ -106,9 +109,9 @@ module router_top #(
     // in from the north neighbour (and therefore carrying the north
     // neighbour's SOUTH output).
     //------------------------------------------------------------------
-    input  logic [NUM_PORTS-1:0][31:0]            in_flit_data,
+    input  logic [NUM_PORTS-1:0][FLIT_W-1:0]      in_flit_data,
     input  logic [NUM_PORTS-1:0]                  in_flit_valid,
-    input  logic [NUM_PORTS-1:0][1:0]             in_vc_id,
+    input  logic [NUM_PORTS-1:0][VC_W-1:0]             in_vc_id,
 
     //------------------------------------------------------------------
     // Outgoing links, one entry per port, and the credits this router
@@ -118,9 +121,9 @@ module router_top #(
     // These two are NOT the same port index: credit_return_valid[p] is
     // consumed by the neighbour that drives in_flit_*[p].
     //------------------------------------------------------------------
-    output logic [NUM_PORTS-1:0][31:0]            out_flit_data,
+    output logic [NUM_PORTS-1:0][FLIT_W-1:0]      out_flit_data,
     output logic [NUM_PORTS-1:0]                  out_flit_valid,
-    output logic [NUM_PORTS-1:0][1:0]             out_vc_id,
+    output logic [NUM_PORTS-1:0][VC_W-1:0]             out_vc_id,
     output logic [NUM_PORTS-1:0][NUM_VC-1:0]      credit_return_valid,
 
     //------------------------------------------------------------------
@@ -130,6 +133,30 @@ module router_top #(
     //------------------------------------------------------------------
     input  logic [NUM_PORTS-1:0][NUM_VC-1:0]      ds_credit_valid
 );
+
+  // VC index width (section 1 of linnea_v2): enough bits to name any of
+  // NUM_VC virtual channels. Derived here so the link sideband, the arbiter
+  // handshake and the input-port signals all agree by construction.
+  localparam int VC_W = (NUM_VC > 1) ? $clog2(NUM_VC) : 1;
+
+  //-------------------------------------------------------------------------
+  // Parameter checks
+  //
+  // Elaboration-time, with the parameter named in the message. Without these
+  // a bad -G override surfaces much later as an index quietly landing outside
+  // its array instead of as the configuration error it is.
+  //-------------------------------------------------------------------------
+
+  initial begin
+    assert ((NUM_VC == 2) || (NUM_VC == 4) || (NUM_VC == 8))
+    else $fatal(1, "router_top: NUM_VC must be 2, 4 or 8 so that VC_W = clog2(NUM_VC) addresses it exactly, got %0d", NUM_VC);
+
+    assert (FLIT_W >= 16)
+    else $fatal(1, "router_top: FLIT_W must be at least 16, got %0d", FLIT_W);
+
+    assert ((FIFO_DEPTH >= 2) && ((FIFO_DEPTH & (FIFO_DEPTH - 1)) == 0))
+    else $fatal(1, "router_top: FIFO_DEPTH must be a power of two >= 2, got %0d", FIFO_DEPTH);
+  end
 
 
   //===========================================================================
@@ -157,12 +184,11 @@ module router_top #(
   logic [NUM_PORTS-1:0][NUM_VC-1:0][3:0]  a_va_req_out_port;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]       a_va_req_single;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]       a_va_gnt;
-  logic [NUM_PORTS-1:0][NUM_VC-1:0][1:0]  a_va_gnt_out_vc;
 
   // SA
   logic [NUM_PORTS-1:0][NUM_VC-1:0]       a_sa_req;
   logic [NUM_PORTS-1:0][NUM_VC-1:0][3:0]  a_sa_req_out_port;
-  logic [NUM_PORTS-1:0][NUM_VC-1:0][1:0]  a_sa_req_out_vc;
+  logic [NUM_PORTS-1:0][NUM_VC-1:0][VC_W-1:0]  a_sa_req_out_vc;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]       a_sa_req_last;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]       a_sa_gnt;
   logic [NUM_PORTS-1:0][NUM_VC-1:0]       a_sa_pick;
@@ -170,16 +196,16 @@ module router_top #(
   // Switch result -> crossbar and output ports
   logic [NUM_PORTS-1:0][2:0]              a_xbar_sel;
   logic [NUM_PORTS-1:0]                   a_st_valid;
-  logic [NUM_PORTS-1:0][1:0]              a_st_out_vc;
+  logic [NUM_PORTS-1:0][VC_W-1:0]              a_st_out_vc;
 
 
   //===========================================================================
   // Crossbar buses
   //===========================================================================
 
-  logic [NUM_PORTS-1:0][31:0] xbar_in_data;
+  logic [NUM_PORTS-1:0][FLIT_W-1:0] xbar_in_data;
   logic [NUM_PORTS-1:0][3:0]  xbar_in_route_next;
-  logic [NUM_PORTS-1:0][31:0] xbar_out_data;
+  logic [NUM_PORTS-1:0][FLIT_W-1:0] xbar_out_data;
   logic [NUM_PORTS-1:0][3:0]  xbar_out_route_next;
 
 
@@ -197,9 +223,9 @@ module router_top #(
     for (genvar p = 0; p < NUM_PORTS; p = p + 1) begin : gen_in_port
 
       // ---- link side -----------------------------------------------------
-      logic [31:0]        l_flit_data;
+      logic [FLIT_W-1:0]  l_flit_data;
       logic               l_flit_valid;
-      logic [1:0]         l_vc_id;
+      logic [VC_W-1:0]         l_vc_id;
       logic [NUM_VC-1:0]  l_credit_return;   // -> top-level output
 
       // ---- arbiter-facing ------------------------------------------------
@@ -207,17 +233,16 @@ module router_top #(
       logic [3:0]         l_va_req_out_port [NUM_VC];   // -> a_va_req_out_port
       logic [NUM_VC-1:0]  l_va_req_single;   // -> a_va_req_single
       logic [NUM_VC-1:0]  l_va_gnt;          // <- a_va_gnt
-      logic [1:0]         l_va_gnt_out_vc [NUM_VC];     // <- a_va_gnt_out_vc
 
       logic [NUM_VC-1:0]  l_req_sa;          // -> a_sa_req
       logic [3:0]         l_sa_req_out_port [NUM_VC];   // -> a_sa_req_out_port
-      logic [1:0]         l_sa_req_out_vc [NUM_VC];     // -> a_sa_req_out_vc
+      logic [VC_W-1:0]         l_sa_req_out_vc [NUM_VC];     // -> a_sa_req_out_vc
       logic [NUM_VC-1:0]  l_sa_req_last;     // -> a_sa_req_last
       logic [NUM_VC-1:0]  l_sa_gnt;          // <- a_sa_gnt
       logic [NUM_VC-1:0]  l_sa_pick;         // <- a_sa_pick
 
       // ---- crossbar-facing -----------------------------------------------
-      logic [31:0]        l_st_flit_data;    // -> xbar_in_data
+      logic [FLIT_W-1:0]  l_st_flit_data;    // -> xbar_in_data
       logic [3:0]         l_st_route_next;   // -> xbar_in_route_next
 
       // ---- link tie-off (section 4.6) ------------------------------------
@@ -230,11 +255,15 @@ module router_top #(
       // Reading in_*[p] here is safe: p is a genvar, so the index is fixed
       // at elaboration, and the expression sits on the right of a
       // continuous assign rather than in a port connection.
-      assign l_flit_data  = HAS_P[p] ? in_flit_data[p]  : 32'h0;
+      assign l_flit_data  = HAS_P[p] ? in_flit_data[p]  : '0;
       assign l_flit_valid = HAS_P[p] ? in_flit_valid[p] : 1'b0;
-      assign l_vc_id      = HAS_P[p] ? in_vc_id[p]      : 2'b0;
+      assign l_vc_id      = HAS_P[p] ? in_vc_id[p]      : '0;
 
       noc_input_port #(
+          .FLIT_W       (FLIT_W),
+          // The buffer and the arbiter's credit pool must agree; both come
+          // from FIFO_DEPTH, so the invariant in the header cannot drift.
+          .DEPTH        (FIFO_DEPTH),
           .NUM_VC       (NUM_VC),
           .CUR_X        (CUR_X),
           .CUR_Y        (CUR_Y),
@@ -254,7 +283,6 @@ module router_top #(
           .va_req_out_port    (l_va_req_out_port),
           .va_req_single      (l_va_req_single),
           .va_gnt             (l_va_gnt),
-          .va_gnt_out_vc      (l_va_gnt_out_vc),
           .req_sa             (l_req_sa),
           .sa_req_out_port    (l_sa_req_out_port),
           .sa_req_out_vc      (l_sa_req_out_vc),
@@ -289,7 +317,6 @@ module router_top #(
         assign a_sa_req_out_port[p][v] = l_sa_req_out_port[v];
         assign a_sa_req_out_vc[p][v]   = l_sa_req_out_vc[v];
         // arbiter -> instance
-        assign l_va_gnt_out_vc[v]      = a_va_gnt_out_vc[p][v];
       end
 
       // ---- folds: instance -> crossbar and -> top-level credit output -----
@@ -322,7 +349,6 @@ module router_top #(
       .va_req_out_port (a_va_req_out_port),
       .va_req_single   (a_va_req_single),
       .va_gnt          (a_va_gnt),
-      .va_gnt_out_vc   (a_va_gnt_out_vc),
       // SA
       .sa_req          (a_sa_req),
       .sa_req_out_port (a_sa_req_out_port),
@@ -347,7 +373,8 @@ module router_top #(
   //===========================================================================
 
   crossbar #(
-      .NUM_PORTS(NUM_PORTS)
+      .NUM_PORTS(NUM_PORTS),
+      .FLIT_W   (FLIT_W)
   ) u_xbar (
       .clk                (clk),
       .rst_n              (rst_n),
@@ -372,21 +399,30 @@ module router_top #(
   generate
     for (genvar p = 0; p < NUM_PORTS; p = p + 1) begin : gen_out_port
 
-      logic [31:0] l_xbar_data;
+      logic [FLIT_W-1:0] l_xbar_data;
       logic [3:0]  l_xbar_route_next;
       logic        l_st_valid;
-      logic [1:0]  l_st_out_vc;
+      logic [VC_W-1:0]  l_st_out_vc;
 
-      logic [31:0] l_flit_data;      // -> top-level output
+      logic [FLIT_W-1:0] l_flit_data;  // -> top-level output
       logic        l_flit_valid;     // -> top-level output
-      logic [1:0]  l_vc_id;          // -> top-level output
+      logic [VC_W-1:0]  l_vc_id;          // -> top-level output
 
       assign l_xbar_data       = xbar_out_data[p];
       assign l_xbar_route_next = xbar_out_route_next[p];
       assign l_st_valid        = a_st_valid[p];
       assign l_st_out_vc       = a_st_out_vc[p];
 
-      noc_output_port u_out_port (
+      noc_output_port #(
+          // Required, not decorative: the output port derives its own VC_W
+          // from NUM_VC to size the st_out_vc/vc_id sideband, and that has
+          // to match the link-side width the router drives it with. Left at
+          // its default, the port keeps a 2-bit sideband while the rest of
+          // the router carries clog2(NUM_VC) bits, and the mismatch only
+          // shows up the moment the sweep leaves NUM_VC = 4.
+          .FLIT_W(FLIT_W),
+          .NUM_VC(NUM_VC)
+      ) u_out_port (
           .clk                (clk),
           .rst_n              (rst_n),
           .xbar_out_data      (l_xbar_data),
