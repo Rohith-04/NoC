@@ -19,6 +19,44 @@ Although this NoC is being developed as the communication backbone for the **Lin
 
 ---
 
+## Router Microarchitecture
+
+A five-port, input-buffered, virtual-channel router. Each input port owns one
+FIFO per virtual channel, and a flit through the main pipeline walks
+
+```
+BW → VA → SA → ST → LT
+```
+
+Route computation is deliberately *not* in that pipeline. `route_compute` is a
+look-ahead: it computes the direction for the **next** router from the header
+the flit arrived with, so the answer is in hand before the flit is allocated
+rather than after it. The result is spliced into the header at the very end, on
+the way out.
+
+![Router microarchitecture: five-port input-buffered VC router](docs/images/router_microarchitecture.svg)
+
+*The VC column reads `VC0 … VC(N-1)` on purpose — `NUM_VC` is 2, 4 or 8 and 4
+is the default every bench runs at, so the figure holds for any of them.*
+
+The RTL maps onto that figure roughly one module per stage, with two
+exceptions worth knowing up front: the FIFOs and the route computer live
+*inside* the input port rather than sitting at router level, and VA and SA are
+two halves of one arbiter rather than two modules.
+
+| Stage | RTL | Notes |
+|---|---|---|
+| **BW** — buffer write | `fifo.sv`, one instance per VC inside `noc_input_port.sv` | Credit-tracked, `FIFO_DEPTH` deep, with one slot of slack so a credit returning in the same cycle a flit is consumed is absorbed |
+| **RC** — look-ahead route compute | `route_compute.sv`, inside `noc_input_port.sv` | Off the main pipeline. An `IS_LOCAL_PORT` parameter is the *only* difference between the LOCAL instance and the four cardinal ones |
+| **VA** — virtual channel allocation | `arbiter.sv`, the row stage | Reserves a free downstream VC; a grant on input VC *v* reserves output VC exactly *v* (v2 §4.5) |
+| **SA** — switch allocation | `arbiter.sv`, stages 1 and 2 | Stage 1 picks a VC within an input port, masked by that VC's credit count; stage 2 picks the output |
+| **ST** — switch traversal | `crossbar.sv` | 5x5 payload mux |
+| **LT** — link traversal | `noc_output_port.sv` | Link register, and the one place a header is rewritten on the way out |
+| — | `noc_input_port.sv` | Bundles BW + RC for one input port and drives that port's half of the arbiter |
+| — | `router_top.sv` | Instantiates the above, ties off absent ports through `HAS_*`, and carries the cross-module seam assertions |
+
+---
+
 ## Current Features
 
 - Synthesizable SystemVerilog RTL
@@ -79,7 +117,7 @@ Although this NoC is being developed as the communication backbone for the **Lin
 .
 ├── rtl/                        # RTL source files
 ├── tb/                         # Testbenches + bench support modules
-├── docs/                       # One Markdown per source file (see below)
+├── docs/                       # One Markdown per source file, plus images/
 ├── sim/                        # Simulation outputs (VCD)
 ├── tools/                      # Mutation / assertion test scripts
 ├── PROGRESS.md                 # state of the work, gotchas, next steps
@@ -126,6 +164,11 @@ Each document has the same three sections, in this order:
    observed result, and which assertions are exercised.
 
 `docs/rtl/fifo.md` is the exemplar; every other document follows it.
+
+`docs/images/` holds figures. The router block diagram under
+[Router Microarchitecture](#router-microarchitecture) is hand-written SVG
+rather than a bitmap, so it stays crisp at any zoom and can be edited in the
+same commit as the RTL it describes.
 
 ---
 

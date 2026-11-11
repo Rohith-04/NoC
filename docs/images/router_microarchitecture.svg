@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1536 645" width="1536" height="645"
+     font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif">
+
+  <defs>
+    <marker id="ah-k" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#111827"/>
+    </marker>
+    <marker id="ah-p" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#8b5cf6"/>
+    </marker>
+    <marker id="ah-o" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#f59e0b"/>
+    </marker>
+    <marker id="ah-r" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <polygon points="0 0, 9 3.5, 0 7" fill="#ef4444"/>
+    </marker>
+  </defs>
+
+  <style>
+    .t    { font-size: 12px; fill: #111827; }
+    .ts   { font-size: 11px; fill: #111827; }
+    .txs  { font-size: 10px; fill: #111827; }
+    .lbl  { font-size: 11px; fill: #374151; }
+    .hdr  { font-size: 14px; font-weight: 700; }
+    .sub  { font-size: 11px; fill: #4b5563; }
+    .box  { stroke-width: 1.2; }
+    .sep  { stroke: #e5e7eb; stroke-width: 1; stroke-dasharray: 3 4; }
+  </style>
+
+  <rect x="1" y="1" width="1534" height="643" rx="10" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+
+  <!-- ===================== title ===================== -->
+  <text x="24" y="34">
+    <tspan font-size="22" font-weight="700" fill="#111827">Router Microarchitecture</tspan>
+    <tspan font-size="22" font-weight="400" fill="#374151" dx="10">— 5-Port Input-Buffered Router</tspan>
+    <tspan font-size="16" font-weight="400" fill="#6b7280" dx="8">(VC0 … VC(N-1) per port)</tspan>
+  </text>
+
+  <!-- ===================== main pipeline banner ===================== -->
+  <rect x="352" y="48" width="530" height="54" rx="8" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.2"/>
+  <text x="617" y="69" text-anchor="middle" class="hdr" fill="#0f172a">MAIN PIPELINE (per flit)</text>
+  <text x="617" y="90" text-anchor="middle" class="t" fill="#111827">BW → VA → SA → ST → LT</text>
+  <text x="872" y="90" text-anchor="end" class="sub" font-style="italic">(RC is not in the main pipeline)</text>
+
+  <!-- ===================== route-info callout ===================== -->
+  <text x="1000" y="70" text-anchor="middle" font-size="13" font-weight="600" fill="#7c3aed">Route info inserted into flit</text>
+  <text x="1000" y="88" text-anchor="middle" font-size="13" font-weight="600" fill="#7c3aed">at ST (before departure)</text>
+  <line x1="905" y1="100" x2="905" y2="204" stroke="#8b5cf6" stroke-width="1.6"
+        stroke-dasharray="6 4" marker-end="url(#ah-p)"/>
+
+  <!-- ===================== column separators ===================== -->
+  <line x1="344"  y1="145" x2="344"  y2="432" class="sep"/>
+  <line x1="430"  y1="145" x2="430"  y2="432" class="sep"/>
+  <line x1="600"  y1="145" x2="600"  y2="432" class="sep"/>
+  <line x1="758"  y1="145" x2="758"  y2="432" class="sep"/>
+  <line x1="934"  y1="145" x2="934"  y2="432" class="sep"/>
+  <line x1="1042" y1="145" x2="1042" y2="432" class="sep"/>
+
+  <!-- ===================== column headers ===================== -->
+  <text x="84"   y="162" text-anchor="middle" class="hdr" fill="#2563eb">INPUT PORTS</text>
+  <text x="84"   y="179" text-anchor="middle" class="sub">(per port)</text>
+
+  <text x="178"  y="162" text-anchor="middle" class="hdr" fill="#16a34a">VCs</text>
+  <text x="178"  y="179" text-anchor="middle" class="sub">(per port)</text>
+
+  <text x="387"  y="162" text-anchor="middle" class="hdr" fill="#2563eb">BW</text>
+  <text x="387"  y="179" text-anchor="middle" class="sub">Buffer Write</text>
+
+  <text x="517"  y="162" text-anchor="middle" class="hdr" fill="#ea580c">VA</text>
+  <text x="517"  y="178" text-anchor="middle" class="sub">Virtual Channel</text>
+  <text x="517"  y="192" text-anchor="middle" class="sub">Allocation</text>
+
+  <text x="678"  y="162" text-anchor="middle" class="hdr" fill="#16a34a">SA</text>
+  <text x="678"  y="178" text-anchor="middle" class="sub">Switch Allocation</text>
+  <text x="678"  y="192" text-anchor="middle" class="sub">(2-Stage)</text>
+
+  <text x="850"  y="162" text-anchor="middle" class="hdr" fill="#dc2626">ST</text>
+  <text x="850"  y="179" text-anchor="middle" class="sub">Switch Traversal</text>
+
+  <text x="988"  y="162" text-anchor="middle" class="hdr" fill="#111827">LT</text>
+  <text x="988"  y="179" text-anchor="middle" class="sub">Link Traversal</text>
+
+  <text x="1151" y="162" text-anchor="middle" class="hdr" fill="#2563eb">OUTPUT PORTS</text>
+  <text x="1151" y="179" text-anchor="middle" class="sub">(per port)</text>
+
+  <!-- ===================== input port boxes ===================== -->
+  <g>
+    <rect x="22" y="213" width="125" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="84" y="232" text-anchor="middle" class="t" font-weight="600">NORTH</text>
+
+    <rect x="22" y="255" width="125" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="84" y="274" text-anchor="middle" class="t" font-weight="600">SOUTH</text>
+
+    <rect x="22" y="297" width="125" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="84" y="316" text-anchor="middle" class="t" font-weight="600">EAST</text>
+
+    <rect x="22" y="339" width="125" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="84" y="358" text-anchor="middle" class="t" font-weight="600">WEST</text>
+
+    <rect x="22" y="381" width="125" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="84" y="400" text-anchor="middle" class="t" font-weight="600">LOCAL</text>
+  </g>
+
+  <!-- port -> VC arrows -->
+  <g stroke="#111827" stroke-width="1.3" marker-end="url(#ah-k)">
+    <line x1="147" y1="228" x2="156" y2="228"/>
+    <line x1="147" y1="270" x2="156" y2="270"/>
+    <line x1="147" y1="312" x2="156" y2="312"/>
+    <line x1="147" y1="354" x2="156" y2="354"/>
+    <line x1="147" y1="396" x2="156" y2="396"/>
+  </g>
+
+  <!-- ===================== VC column (generic) ===================== -->
+  <g>
+    <rect x="158" y="214" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="224" text-anchor="middle" font-size="9" fill="#111827">VC0</text>
+    <text x="178" y="234" text-anchor="middle" class="txs" fill="#6b7280">⋮</text>
+    <rect x="158" y="236" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="246" text-anchor="middle" font-size="9" fill="#111827">VC(N-1)</text>
+
+    <rect x="158" y="256" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="266" text-anchor="middle" font-size="9" fill="#111827">VC0</text>
+    <text x="178" y="276" text-anchor="middle" class="txs" fill="#6b7280">⋮</text>
+    <rect x="158" y="278" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="288" text-anchor="middle" font-size="9" fill="#111827">VC(N-1)</text>
+
+    <rect x="158" y="298" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="308" text-anchor="middle" font-size="9" fill="#111827">VC0</text>
+    <text x="178" y="318" text-anchor="middle" class="txs" fill="#6b7280">⋮</text>
+    <rect x="158" y="320" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="330" text-anchor="middle" font-size="9" fill="#111827">VC(N-1)</text>
+
+    <rect x="158" y="340" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="350" text-anchor="middle" font-size="9" fill="#111827">VC0</text>
+    <text x="178" y="360" text-anchor="middle" class="txs" fill="#6b7280">⋮</text>
+    <rect x="158" y="362" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="372" text-anchor="middle" font-size="9" fill="#111827">VC(N-1)</text>
+
+    <rect x="158" y="382" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="392" text-anchor="middle" font-size="9" fill="#111827">VC0</text>
+    <text x="178" y="402" text-anchor="middle" class="txs" fill="#6b7280">⋮</text>
+    <rect x="158" y="404" width="40" height="13" rx="3" fill="#dcfce7" stroke="#4ade80" class="box"/>
+    <text x="178" y="414" text-anchor="middle" font-size="9" fill="#111827">VC(N-1)</text>
+  </g>
+
+  <!-- VC -> FIFO arrows -->
+  <g stroke="#111827" stroke-width="1.3" marker-end="url(#ah-k)">
+    <line x1="199" y1="228" x2="206" y2="228"/>
+    <line x1="199" y1="270" x2="206" y2="270"/>
+    <line x1="199" y1="312" x2="206" y2="312"/>
+    <line x1="199" y1="354" x2="206" y2="354"/>
+    <line x1="199" y1="396" x2="206" y2="396"/>
+  </g>
+
+  <!-- ===================== input FIFOs ===================== -->
+  <text x="268" y="205" text-anchor="middle" class="lbl" font-weight="600">Input FIFO</text>
+  <g>
+    <rect x="207" y="213" width="122" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <rect x="207" y="255" width="122" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <rect x="207" y="297" width="122" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <rect x="207" y="339" width="122" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <rect x="207" y="381" width="122" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+  </g>
+
+  <!-- ===================== main data-path spine ===================== -->
+  <g stroke="#111827" stroke-width="1.8" marker-end="url(#ah-k)">
+    <line x1="329" y1="228" x2="454" y2="228"/>
+    <line x1="580" y1="228" x2="621" y2="228"/>
+    <line x1="734" y1="228" x2="781" y2="228"/>
+    <line x1="918" y1="228" x2="974" y2="228"/>
+    <line x1="1006" y1="228" x2="1087" y2="228"/>
+  </g>
+
+  <!-- ===================== VA ===================== -->
+  <rect x="455" y="213" width="125" height="165" rx="7" fill="#ffedd5" stroke="#fb923c" stroke-width="1.3"/>
+  <text x="517" y="240" text-anchor="middle" class="t" font-weight="600">VC Arbiter</text>
+  <text x="517" y="256" text-anchor="middle" class="lbl">(per output port)</text>
+  <text x="517" y="292" text-anchor="middle" class="lbl">Requests VC</text>
+  <text x="517" y="307" text-anchor="middle" class="lbl">in next router</text>
+  <text x="517" y="340" text-anchor="middle" class="lbl">Grants VC</text>
+  <text x="517" y="355" text-anchor="middle" class="lbl">from next router</text>
+
+  <!-- ===================== SA ===================== -->
+  <rect x="622" y="213" width="112" height="177" rx="7" fill="#dcfce7" stroke="#4ade80" stroke-width="1.3"/>
+  <text x="678" y="240" text-anchor="middle" font-size="11" font-weight="600">Switch Allocator</text>
+  <text x="678" y="256" text-anchor="middle" class="lbl">(two-stage)</text>
+  <rect x="630" y="272" width="96" height="46" rx="5" fill="#bbf7d0" stroke="#22c55e" class="box"/>
+  <text x="678" y="292" text-anchor="middle" font-size="10" font-weight="600">1st Stage</text>
+  <text x="678" y="307" text-anchor="middle" font-size="10">(VC Select)</text>
+  <rect x="630" y="326" width="96" height="46" rx="5" fill="#bbf7d0" stroke="#22c55e" class="box"/>
+  <text x="678" y="346" text-anchor="middle" font-size="10" font-weight="600">2nd Stage</text>
+  <text x="678" y="361" text-anchor="middle" font-size="10">(Output Select)</text>
+
+  <!-- ===================== crossbar ===================== -->
+  <rect x="782" y="213" width="136" height="177" rx="7" fill="#fee2e2" stroke="#f87171" stroke-width="1.3"/>
+  <g stroke="#ef4444" stroke-width="1.6" fill="none">
+    <line x1="815" y1="372" x2="815" y2="238" marker-end="url(#ah-r)"/>
+    <line x1="850" y1="372" x2="850" y2="238" marker-end="url(#ah-r)"/>
+    <line x1="885" y1="372" x2="885" y2="238" marker-end="url(#ah-r)"/>
+    <line x1="800" y1="272" x2="905" y2="272" marker-end="url(#ah-r)"/>
+    <line x1="800" y1="305" x2="905" y2="305" marker-end="url(#ah-r)"/>
+    <line x1="800" y1="338" x2="905" y2="338" marker-end="url(#ah-r)"/>
+  </g>
+  <rect x="806" y="284" width="88" height="40" fill="#ffffff" fill-opacity="0.88" rx="4"/>
+  <text x="850" y="302" text-anchor="middle" font-size="14" font-weight="700" fill="#b91c1c">CROSSBAR</text>
+  <text x="850" y="318" text-anchor="middle" class="t" fill="#b91c1c">5 x 5</text>
+
+  <!-- ===================== LT ===================== -->
+  <rect x="946" y="205" width="14" height="216" rx="4" fill="#e0f2fe" stroke="#7dd3fc" class="box"/>
+  <g>
+    <rect x="975" y="217" width="30" height="22" rx="3" fill="#e0f2fe" stroke="#7dd3fc" class="box"/>
+    <polygon points="984,222 998,228 984,234" fill="#38bdf8"/>
+    <rect x="975" y="259" width="30" height="22" rx="3" fill="#e0f2fe" stroke="#7dd3fc" class="box"/>
+    <polygon points="984,264 998,270 984,276" fill="#38bdf8"/>
+    <rect x="975" y="301" width="30" height="22" rx="3" fill="#e0f2fe" stroke="#7dd3fc" class="box"/>
+    <polygon points="984,306 998,312 984,318" fill="#38bdf8"/>
+    <rect x="975" y="343" width="30" height="22" rx="3" fill="#e0f2fe" stroke="#7dd3fc" class="box"/>
+    <polygon points="984,348 998,354 984,360" fill="#38bdf8"/>
+    <rect x="975" y="385" width="30" height="22" rx="3" fill="#e0f2fe" stroke="#7dd3fc" class="box"/>
+    <polygon points="984,390 998,396 984,402" fill="#38bdf8"/>
+  </g>
+
+  <!-- buffers -> output ports -->
+  <g stroke="#111827" stroke-width="1.4" marker-end="url(#ah-k)">
+    <line x1="1008" y1="270" x2="1086" y2="270"/>
+    <line x1="1008" y1="312" x2="1086" y2="312"/>
+    <line x1="1008" y1="354" x2="1086" y2="354"/>
+    <line x1="1008" y1="396" x2="1086" y2="396"/>
+  </g>
+
+  <!-- ===================== output port boxes ===================== -->
+  <g>
+    <rect x="1088" y="213" width="127" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="1151" y="232" text-anchor="middle" class="t" font-weight="600">NORTH</text>
+    <rect x="1088" y="255" width="127" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="1151" y="274" text-anchor="middle" class="t" font-weight="600">SOUTH</text>
+    <rect x="1088" y="297" width="127" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="1151" y="316" text-anchor="middle" class="t" font-weight="600">EAST</text>
+    <rect x="1088" y="339" width="127" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="1151" y="358" text-anchor="middle" class="t" font-weight="600">WEST</text>
+    <rect x="1088" y="381" width="127" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa" class="box"/>
+    <text x="1151" y="400" text-anchor="middle" class="t" font-weight="600">LOCAL</text>
+  </g>
+
+  <!-- ===================== control network ===================== -->
+  <text x="352" y="452" text-anchor="middle" class="lbl" fill="#b45309">Header fields</text>
+  <text x="352" y="467" text-anchor="middle" class="lbl" fill="#b45309">(HEAD flit only)</text>
+
+  <g stroke="#f59e0b" stroke-width="1.4" stroke-dasharray="6 4" fill="none">
+    <line x1="250" y1="500" x2="250" y2="416" marker-end="url(#ah-o)"/>
+    <line x1="387" y1="500" x2="387" y2="246" marker-end="url(#ah-o)"/>
+    <line x1="517" y1="500" x2="517" y2="382" marker-end="url(#ah-o)"/>
+    <line x1="678" y1="500" x2="678" y2="394" marker-end="url(#ah-o)"/>
+    <line x1="850" y1="500" x2="850" y2="394" marker-end="url(#ah-o)"/>
+    <line x1="954" y1="500" x2="954" y2="424" marker-end="url(#ah-o)"/>
+    <line x1="1151" y1="500" x2="1151" y2="416" marker-end="url(#ah-o)"/>
+    <line x1="250" y1="500" x2="1151" y2="500"/>
+  </g>
+
+  <!-- ===================== RC ===================== -->
+  <rect x="22" y="432" width="196" height="138" rx="7" fill="#ede9fe" stroke="#a78bfa" stroke-width="1.3"/>
+  <text x="120" y="456" text-anchor="middle" font-size="10" font-weight="600" fill="#6d28d9">RC (Look-Ahead Route Compute)</text>
+  <text x="120" y="472" text-anchor="middle" class="lbl" fill="#6d28d9" font-style="italic">(not in main pipeline)</text>
+  <text x="120" y="502" text-anchor="middle" class="lbl">Computes next direction</text>
+  <text x="120" y="517" text-anchor="middle" class="lbl">for HEAD flit using</text>
+  <text x="120" y="532" text-anchor="middle" class="lbl">destination address</text>
+  <text x="120" y="552" text-anchor="middle" class="lbl">(XY routing)</text>
+
+  <line x1="218" y1="545" x2="424" y2="545" stroke="#8b5cf6" stroke-width="1.6"
+        stroke-dasharray="6 4" marker-end="url(#ah-p)"/>
+  <text x="321" y="536" text-anchor="middle" class="lbl" fill="#7c3aed">Next direction (N+1)</text>
+
+  <!-- ===================== router control ===================== -->
+  <rect x="425" y="520" width="495" height="55" rx="7" fill="#fef9c3" stroke="#facc15" stroke-width="1.3"/>
+  <text x="672" y="542" text-anchor="middle" class="t" font-weight="600">Router Control (per router)</text>
+  <text x="672" y="560" text-anchor="middle" class="lbl">Credit Management  •  VC State (per output port, per VC)</text>
+  <text x="672" y="572" text-anchor="middle" class="lbl">Arbitration Control  •  Error Detection  •  Reset</text>
+
+  <!-- ===================== legend ===================== -->
+  <rect x="1288" y="148" width="230" height="265" rx="7" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>
+  <text x="1300" y="172" font-size="13" font-weight="700" fill="#111827">LEGEND (Router)</text>
+
+  <rect x="1300" y="184" width="22" height="13" rx="3" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="1330" y="195" class="txs">Buffers (per port, per VC)</text>
+  <rect x="1300" y="205" width="22" height="13" rx="3" fill="#ede9fe" stroke="#a78bfa"/>
+  <text x="1330" y="216" class="txs">Computation (Head Flit)</text>
+  <rect x="1300" y="226" width="22" height="13" rx="3" fill="#ffedd5" stroke="#fb923c"/>
+  <text x="1330" y="237" class="txs">Allocation (per output port)</text>
+  <rect x="1300" y="247" width="22" height="13" rx="3" fill="#dcfce7" stroke="#4ade80"/>
+  <text x="1330" y="258" class="txs">Arbitration (per output port)</text>
+  <rect x="1300" y="268" width="22" height="13" rx="3" fill="#fee2e2" stroke="#f87171"/>
+  <text x="1330" y="279" class="txs">Data Path (per flit)</text>
+  <rect x="1300" y="289" width="22" height="13" rx="3" fill="#e0f2fe" stroke="#7dd3fc"/>
+  <text x="1330" y="300" class="txs">Links (per port)</text>
+  <rect x="1300" y="310" width="22" height="13" rx="3" fill="#fef9c3" stroke="#facc15"/>
+  <text x="1330" y="321" class="txs">Control (per router)</text>
+
+  <text x="1300" y="344" font-size="11" font-weight="700" fill="#111827">PATH TYPES</text>
+  <line x1="1302" y1="357" x2="1326" y2="357" stroke="#111827" stroke-width="1.6" marker-end="url(#ah-k)"/>
+  <text x="1334" y="361" class="txs">Data Path (all flits)</text>
+  <line x1="1302" y1="375" x2="1326" y2="375" stroke="#8b5cf6" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ah-p)"/>
+  <text x="1334" y="379" class="txs">Control Path (HEAD flit only)</text>
+  <line x1="1302" y1="393" x2="1326" y2="393" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="5 3" marker-end="url(#ah-o)"/>
+  <text x="1334" y="397" class="txs">Control Path (all flits)</text>
+
+  <!-- ===================== notes ===================== -->
+  <rect x="1288" y="452" width="230" height="170" rx="7" fill="#ffffff" stroke="#9ca3af" stroke-width="1.2"/>
+  <text x="1300" y="474" font-size="13" font-weight="700" fill="#111827">NOTES</text>
+  <text x="1300" y="494" class="txs">• 5 Ports: N, S, E, W, Local</text>
+  <text x="1300" y="511" class="txs">• NUM_VC VCs per input port</text>
+  <text x="1322" y="525" class="txs" fill="#4b5563">(2, 4 or 8; default 4)</text>
+  <text x="1300" y="543" class="txs">• Deterministic XY routing</text>
+  <text x="1300" y="560" class="txs">• Credit-based flow control</text>
+  <text x="1300" y="578" class="txs">• RC is look-ahead computation</text>
+  <text x="1322" y="592" class="txs" fill="#4b5563">for the next router (N+1),</text>
+  <text x="1322" y="606" class="txs" fill="#4b5563">not part of the main pipeline</text>
+</svg>
