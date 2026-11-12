@@ -1,0 +1,16 @@
+digraph G {
+ graph [rankdir=LR, splines=ortho, forcelabels=true, bgcolor="white", pad="0.35", nodesep="0.42", ranksep="0.65", fontname="DejaVu Sans", fontsize=20, labelloc=t, label="crossbar: combinational selection for five physical outputs"];
+ node [shape=box, style="filled", fillcolor="#f8fafc", color="#334155", penwidth=1.5, fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12"];
+ edge [color="#334155", fontname="DejaVu Sans", fontsize=10, arrowsize=0.75];
+
+ data [label="xbar_in_data[5]\nOne selected VC from each input",fillcolor="#f8fafc"];
+ route [label="xbar_in_route_next[5]",fillcolor="#f8fafc"];
+ sel [label="xbar_sel[output]\nWinning physical input index",fillcolor="#e2e8f0",color="#334155"];
+ mux [label="Data multiplexers ×5\n5-to-1 per output"];
+ rm [label="Lookahead multiplexers ×5\nSame select as data"];
+ valid [label="st_valid[5]",fillcolor="#e2e8f0",color="#334155"];
+ gate [label="Output validity mask\nIdle output = zero"];
+ out [label="xbar_out_data[5]\nxbar_out_route_next[5]",fillcolor="#f8fafc"];
+ data -> mux; route -> rm; sel -> mux [style=dashed]; sel -> rm [style=dashed];
+ mux -> gate; rm -> gate; valid -> gate [style=dashed]; gate -> out;
+}

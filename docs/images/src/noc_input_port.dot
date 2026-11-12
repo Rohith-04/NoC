@@ -1,0 +1,24 @@
+digraph G {
+ graph [rankdir=LR, splines=ortho, forcelabels=true, bgcolor="white", pad="0.35", nodesep="0.42", ranksep="0.65", fontname="DejaVu Sans", fontsize=20, labelloc=t, label="noc_input_port: input FIFO identity and assigned output VC are distinct"];
+ node [shape=box, style="filled", fillcolor="#f8fafc", color="#334155", penwidth=1.5, fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12"];
+ edge [color="#334155", fontname="DejaVu Sans", fontsize=10, arrowsize=0.75];
+
+ link [label="Incoming flit / valid / vc_id",fillcolor="#f8fafc"];
+ demux [label="Input VC demultiplexer"];
+ fifo [label="fifo × NUM_VC\nRegistered head + empty bypass"];
+ rc [label="route_compute × NUM_VC\nroute_self / route_next"];
+ state [label="Per-input-VC packet state\nhead_valid / out_port\nout_vc / assignment_valid",fillcolor="#e2e8f0",color="#334155"];
+ ctl [label="Fetch / packet control\nVA and SA request generation"];
+ a [label="Shared arbiter interface\nVA: request / grant + output VC\nSA: request / pick / final grant",fillcolor="#f8fafc"];
+ mux [label="SA-pick input mux\nOne VC per physical input"];
+ out [label="st_flit_data / st_route_next\nTo crossbar",fillcolor="#f8fafc"];
+ cr [label="Registered credit_return_valid\nInput FIFO index",fillcolor="#f8fafc"];
+ link -> demux; demux -> fifo; fifo -> mux; mux -> out;
+ fifo -> rc ; rc -> state ; rc -> mux ;
+ fifo -> ctl [style=dashed]; state -> ctl [style=dashed];
+ ctl -> a [style=dashed,color="#334155"];
+ a -> state [style=dashed,color="#334155",constraint=false];
+ a -> mux [style=dashed,color="#334155",constraint=false];
+ a -> ctl [style=dashed,color="#334155",constraint=false];
+ ctl -> fifo [style=dashed,constraint=false]; ctl -> cr ;
+}

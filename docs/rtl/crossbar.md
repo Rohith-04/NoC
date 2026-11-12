@@ -1,11 +1,13 @@
-# `crossbar` — `rtl/crossbar.sv`
+# `crossbar` - `rtl/crossbar.sv`
+
+![crossbar block diagram](../images/crossbar.svg)
 
 Five independent 5:1 muxes for the flit payload, plus a second, narrower
 set for the 4-bit lookahead route. No state, no credit knowledge, no clocked
 process: the arbiter decides *who* switches, this decides *what they carry*.
 
 Splitting that decision into its own module is a verification boundary as
-much as an RTL one — it is what lets `rtl/arbiter.md` be verified without
+much as an RTL one - it is what lets `rtl/arbiter.md` be verified without
 modelling full-width payloads (spec §5, seam 6).
 
 ---
@@ -17,7 +19,7 @@ modelling full-width payloads (spec §5, seam 6).
 | Name | Type | Default | Meaning |
 |---|---|---|---|
 | `NUM_PORTS` | `int` | 5 | Number of simultaneous inputs and outputs. Fixed at 5 for a single router (LOCAL, NORTH, EAST, WEST, SOUTH); the parameter exists so the port count is stated once, not so the block is reconfigurable. |
-| `FLIT_W` | `int` | 40 | Width of one flit, and therefore of the payload path. Everything the router reads from a flit is in the low 14 bits, so this only widens the muxed data — no slice in this module depends on the absolute width. |
+| `FLIT_W` | `int` | 40 | Width of one flit, and therefore of the payload path. Everything the router reads from a flit is in the low 14 bits, so this only widens the muxed data - no slice in this module depends on the absolute width. |
 
 ### 1.2 Port declaration
 
@@ -49,18 +51,18 @@ at every use.
 | `r` | 4 | `logic` (block-local scratch) | n/a | Same port's lookahead route, same discipline. |
 
 That is the entire state. There is no flop, no memory, no register, and no
-reset value — `clk` and `rst_n` are carried for the assertions and for port
+reset value - `clk` and `rst_n` are carried for the assertions and for port
 list uniformity only.
 
 ---
 
 ## 2. RTL explanation
 
-### 2.1 One `always_comb`, not two (lines 109–133)
+### 2.1 One `always_comb`, not two
 
 Both muxes live in a single `mux5` block. They are two views of one
 selection, so gating them in one place is the only way they cannot drift
-apart — the failure mode the tracking assertion in §2.3 exists to catch.
+apart - the failure mode the tracking assertion in §2.3 exists to catch.
 
 Inside the loop:
 
@@ -102,22 +104,22 @@ the range check: `xbar_sel` is 3 bits and can represent 0..7, but only
 0..4 index a real entry. The guard keeps simulation defined; the assertion
 below says the guard should never have to fire.
 
-### 2.3 Assertions — this module's half of seam 6 (lines 147–188)
+### 2.3 Assertions - this module's half of seam 6
 
 The arbiter promises that `xbar_sel` names an input port SA stage 1 already
-picked. That promise has to be checked *here*, where it is consumed — a
+picked. That promise has to be checked *here*, where it is consumed - a
 broken grant reaching the link with a plausible payload only shows up as a
 protocol error in the **next** router, far from its cause.
 
 Three properties, one per `o` in a generate over `NUM_PORTS`:
 
-1. **Range** — `st_valid[o] |-> xbar_sel[o] < NUM_PORTS`. Makes the guard in
+1. **Range** - `st_valid[o] |-> xbar_sel[o] < NUM_PORTS`. Makes the guard in
    §2.2 provably dead rather than silently absorbing a bug.
-2. **Idle outputs are silent** — `!st_valid[o] |-> data == 0 && route == 0`.
+2. **Idle outputs are silent** - `!st_valid[o] |-> data == 0 && route == 0`.
    This is the assertion form of §2.2's zero-when-idle rule; it is checked on
    the *output*, so it also catches a future edit that removes the default
    assignment.
-3. **Both muxes name the same input** —
+3. **Both muxes name the same input** -
    `(st_valid && in-range) |-> out_data == in_data[sel] && out_route == in_route[sel]`.
    Two independent equalities against the *same* `xbar_sel`, so that re-gating
    one mux with something subtly different from the other, or pointing one at
@@ -145,37 +147,37 @@ recognisable pattern on `xbar_in_data[i]` and a legal direction on
 is 25 directed points per signal pair, plus per-port idle cases.
 
 The patterns are chosen so that reading the *adjacent* input, or the *same*
-input of a different output, produces a different value — that is what makes
+input of a different output, produces a different value - that is what makes
 the "mux reads the port next to the winner" mutation detectable rather than
 merely wrong.
 
 ### 3.2 What the bench proves specifically
 
-- **Selection correctness** — `xbar_out_data[o]` equals
+- **Selection correctness** - `xbar_out_data[o]` equals
   `xbar_in_data[xbar_sel[o]]` and nothing else, for all 25 pairs.
-- **Route co-selection** — `xbar_out_route_next[o]` follows the *same* index.
+- **Route co-selection** - `xbar_out_route_next[o]` follows the *same* index.
   Checked independently of the payload so that a payload-correct but
   route-stale output is a failure.
-- **Zero when idle** — with `st_valid[o] = 0` and arbitrary `xbar_sel[o]`
+- **Zero when idle** - with `st_valid[o] = 0` and arbitrary `xbar_sel[o]`
   (including out-of-range values), both outputs read zero. This is the check
   that would catch removal of the unconditional default assignment.
-- **Out-of-range select stays defined** — `xbar_sel[o]` driven to values
+- **Out-of-range select stays defined** - `xbar_sel[o]` driven to values
   `>= NUM_PORTS` must not read past the end of the array and must not emit a
   payload.
-- **No X, no latch** — outputs are checked after settling on every point; an
+- **No X, no latch** - outputs are checked after settling on every point; an
   inferred latch on `d`/`r` shows up as a stale value on the next point.
 
 ### 3.3 Bench mechanics
 
 Pure combinational block, so the bench drives inputs, settles with a
-`#delay`, and samples — no clocked stimulus is needed. The endpoint rule in
+`#delay`, and samples - no clocked stimulus is needed. The endpoint rule in
 `README.md` applies: every DUT port endpoint must be a plain scalar or the
 whole array, never an element select, or the connection freezes after time 0.
 
 ### 3.4 Assertion coverage
 
 The three seam properties in §2.3 are exercised on every check because they
-are sampled continuously while the sweep runs — the idle-output property in
+are sampled continuously while the sweep runs - the idle-output property in
 particular is checked on every one of the idle cases from §3.2.
 
 `tools/assert_neg.sh` case *"crossbar: data mux reads the port next to the
@@ -190,18 +192,18 @@ mux to select `(xbar_sel[o] + 1) % NUM_PORTS`:
 That is the proof the assertion side works: with `--assert` the property
 fires and the run aborts at the first violation. The same mutation run
 *without* `--assert` (as `tools/mutate_all.sh` does) is caught instead by
-the bench — **30/103 CHECKS FAILED** — which is why both suites exist: one
+the bench - **30/103 CHECKS FAILED** - which is why both suites exist: one
 proves the benches, the other proves the assertions.
 
 ### 3.5 Mutation sanity
 
-`tools/mutate_all.sh` targets this file once — *"crossbar: data mux reads the
+`tools/mutate_all.sh` targets this file once - *"crossbar: data mux reads the
 port next to the winner"*, which selects `(xbar_sel[o] + 1) % NUM_PORTS`
 instead of `xbar_sel[o]`. It is killed by `tb_router_top` at **30/103 CHECKS
 FAILED**, the largest kill count in the suite: every routed packet takes the
 wrong payload, so essentially the whole run fails. (103 rather than the clean
 bench's 104 because one of its checks sits behind an `rx_n()` guard and is
-never reached — see `tb_router_top.md` §3.4 for why the denominators vary.)
+never reached - see `tb_router_top.md` §3.4 for why the denominators vary.)
 
 The header merge and link register that consume these outputs are covered by
 the two mutations in `tools/mutate_out.sh`, documented in

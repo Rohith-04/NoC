@@ -33,7 +33,7 @@
   <!-- ===================== title ===================== -->
   <text x="24" y="34">
     <tspan font-size="22" font-weight="700" fill="#111827">Router Microarchitecture</tspan>
-    <tspan font-size="22" font-weight="400" fill="#374151" dx="10">— 5-Port Input-Buffered Router</tspan>
+    <tspan font-size="22" font-weight="400" fill="#374151" dx="10">- 5-Port Input-Buffered Router</tspan>
     <tspan font-size="16" font-weight="400" fill="#6b7280" dx="8">(VC0 … VC(N-1) per port)</tspan>
   </text>
 

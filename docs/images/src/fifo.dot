@@ -1,0 +1,20 @@
+digraph G {
+ graph [rankdir=TB, splines=ortho, forcelabels=true, bgcolor="white", pad="0.35", nodesep="0.42", ranksep="0.65", fontname="DejaVu Sans", fontsize=20, labelloc=t, label="fifo: synchronous storage with registered output and empty bypass"];
+ node [shape=box, style="filled", fillcolor="#f8fafc", color="#334155", penwidth=1.5, fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12"];
+ edge [color="#334155", fontname="DejaVu Sans", fontsize=10, arrowsize=0.75];
+
+ d [label="data_in / wr_enable", fillcolor="#f8fafc"];
+ mem [label="Memory\nDEPTH × WIDTH"];
+ read [label="Read / bypass selection"];
+ q [label="Output register\ndata_out"];
+ ptr [label="Read + write pointers\nAddress and wrap bits", fillcolor="#e2e8f0", color="#334155"];
+ stat [label="Pointer comparisons\nempty / full\nProtocol check: err"];
+ en [label="rd_enable / clk / rst_n", fillcolor="#f8fafc"];
+ d -> mem ;
+ mem -> read ;
+ d -> read ;
+ read -> q ;
+ en -> ptr [style=dashed]; ptr -> mem [style=dashed];
+ ptr -> read [style=dashed]; ptr -> stat;
+ en -> read [style=dashed]; stat -> read [ style=dashed, constraint=false];
+}

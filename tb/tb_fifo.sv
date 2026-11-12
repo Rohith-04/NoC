@@ -1,19 +1,13 @@
+// Self-checking tests for fifo.
+
 `timescale 1ns / 1ps
 
 module tb_fifo;
 
-  //---------------------------------------------------------------
-  // 1. Parameters
-  //---------------------------------------------------------------
-  // Matches the design's flit width (linnea_v2 section 1). The FIFO is
-  // width-agnostic; this is the width the rest of the design runs at.
   localparam int WIDTH = 40;
   parameter  int FIFO_DEPTH = 4;
   localparam realtime CLK_PERIOD = 10ns;
 
-  //---------------------------------------------------------------
-  // 2. DUT I/O Signals
-  //---------------------------------------------------------------
   logic             clk;
   logic             rst_n;
 
@@ -26,26 +20,14 @@ module tb_fifo;
   logic             full;
   logic             err;
 
-  //---------------------------------------------------------------
-  // 3. Reference Model State
-  //---------------------------------------------------------------
   logic [WIDTH-1:0] ref_model  [$];
 
-  //---------------------------------------------------------------
-  // 4. Bookkeeping
-  //---------------------------------------------------------------
   int               checks = 0;
   int               errors = 0;
 
-  //---------------------------------------------------------------
-  // 5. Clock Generation
-  //---------------------------------------------------------------
   initial clk = 0;
   always #(CLK_PERIOD / 2) clk = ~clk;
 
-  //---------------------------------------------------------------
-  // 6. Reset Task
-  //---------------------------------------------------------------
   task automatic reset_dut();
     wr_enable = 1'b0;
     rd_enable = 1'b0;
@@ -59,9 +41,6 @@ module tb_fifo;
     ref_model.delete();
   endtask
 
-  //---------------------------------------------------------------
-  // 7. DUT Instantiation
-  //---------------------------------------------------------------
   fifo #(
       .WIDTH(WIDTH),
       .DEPTH(FIFO_DEPTH)
@@ -77,9 +56,6 @@ module tb_fifo;
       .err      (err)
   );
 
-  //---------------------------------------------------------------
-  // 8. Check Task
-  //---------------------------------------------------------------
   task automatic check(string name, bit cond);
     checks++;
 
@@ -90,22 +66,6 @@ module tb_fifo;
     end
   endtask
 
-  //---------------------------------------------------------------
-  // 9. Driver Tasks
-  //---------------------------------------------------------------
-
-  //---------------------------------------------------------------
-  // WRITE ONLY
-  //
-  // Normal write:
-  //   - write accepted
-  //   - FIFO occupancy increases
-  //
-  // Write while full:
-  //   - write rejected
-  //   - err asserted
-  //   - occupancy unchanged
-  //---------------------------------------------------------------
   task automatic drive_write(input logic [WIDTH-1:0] data);
     bit was_full;
     bit exp_err;
@@ -137,19 +97,6 @@ module tb_fifo;
     wr_enable = 1'b0;
   endtask
 
-  //---------------------------------------------------------------
-  // READ ONLY
-  //
-  // Normal read:
-  //   - read accepted
-  //   - oldest element returned
-  //   - occupancy decreases
-  //
-  // Read while empty:
-  //   - read rejected
-  //   - err asserted
-  //   - data_out unchanged
-  //---------------------------------------------------------------
   task automatic drive_read();
     logic [WIDTH-1:0] exp_data;
     logic [WIDTH-1:0] prev_data_out;
@@ -192,28 +139,6 @@ module tb_fifo;
     rd_enable = 1'b0;
   endtask
 
-  //---------------------------------------------------------------
-  // SIMULTANEOUS READ + WRITE
-  //
-  // Case 1: EMPTY
-  //   - bypass data_in -> data_out
-  //   - no memory write
-  //   - no pointer movement
-  //   - occupancy remains zero
-  //   - err = 0
-  //
-  // Case 2: FULL
-  //   - read proceeds
-  //   - write is rejected
-  //   - err = 1
-  //   - occupancy decreases by one
-  //
-  // Case 3: NORMAL
-  //   - read oldest element
-  //   - write new element
-  //   - occupancy unchanged
-  //   - err = 0
-  //---------------------------------------------------------------
   task automatic drive_read_write(input logic [WIDTH-1:0] data);
     logic [WIDTH-1:0] exp_data;
     bit was_empty;
@@ -228,9 +153,6 @@ module tb_fifo;
     was_empty = (ref_model.size() == 0);
     was_full  = (ref_model.size() == FIFO_DEPTH);
 
-    //-------------------------------------------------------------
-    // Check combinational protocol signals BEFORE clock edge
-    //-------------------------------------------------------------
     #0;
 
     if (was_empty) begin
@@ -247,15 +169,9 @@ module tb_fifo;
 
     end
 
-    //-------------------------------------------------------------
-    // Clock edge: transaction occurs
-    //-------------------------------------------------------------
     @(posedge clk);
     #1;
 
-    //-------------------------------------------------------------
-    // EMPTY + R/W: bypass
-    //-------------------------------------------------------------
     if (was_empty) begin
 
       check("R/W empty bypass: empty flag", empty == 1'b1);
@@ -264,11 +180,8 @@ module tb_fifo;
 
       check("R/W empty bypass: data_out", data_out == data);
 
-      // Reference model remains empty.
-    end  //-------------------------------------------------------------
-         // FULL + R/W:
-         // read succeeds, write is rejected
-         //-------------------------------------------------------------
+    end
+
     else if (was_full) begin
 
       exp_data = ref_model.pop_front();
@@ -279,11 +192,8 @@ module tb_fifo;
 
       check("R/W full: data_out", data_out == exp_data);
 
-      // No push_back(data).
-    end  //-------------------------------------------------------------
-         // NORMAL + R/W:
-         // read and write both succeed
-         //-------------------------------------------------------------
+    end
+
     else begin
 
       exp_data = ref_model.pop_front();
@@ -304,10 +214,6 @@ module tb_fifo;
 
   endtask
 
-  //---------------------------------------------------------------
-  // 10. Directed Tests
-  //---------------------------------------------------------------
-
   task automatic test_reset();
     $display("--- Running test_reset ---");
 
@@ -320,9 +226,6 @@ module tb_fifo;
     check("Reset: err", err == 1'b0);
   endtask
 
-  //---------------------------------------------------------------
-  // Fill FIFO with writes
-  //---------------------------------------------------------------
   task automatic test_write_only();
     $display("--- Running test_write_only ---");
 
@@ -333,9 +236,6 @@ module tb_fifo;
     end
   endtask
 
-  //---------------------------------------------------------------
-  // Fill then drain FIFO
-  //---------------------------------------------------------------
   task automatic test_read_only();
     $display("--- Running test_read_only ---");
 
@@ -350,9 +250,6 @@ module tb_fifo;
     end
   endtask
 
-  //---------------------------------------------------------------
-  // Explicit full condition
-  //---------------------------------------------------------------
   task automatic test_full();
     $display("--- Running test_full ---");
 
@@ -367,9 +264,6 @@ module tb_fifo;
     check("Test Full: empty flag deasserted", empty == 1'b0);
   endtask
 
-  //---------------------------------------------------------------
-  // Explicit empty read violation
-  //---------------------------------------------------------------
   task automatic test_empty();
     $display("--- Running test_empty ---");
 
@@ -384,15 +278,11 @@ module tb_fifo;
     check("Test Empty: err asserted", err == 1'b1);
   endtask
 
-  //---------------------------------------------------------------
-  // Normal simultaneous read/write
-  //---------------------------------------------------------------
   task automatic test_simultaneous_read_write();
     $display("--- Running test_simultaneous_read_write ---");
 
     reset_dut();
 
-    // Partially fill FIFO.
     drive_write($urandom);
     drive_write($urandom);
 
@@ -401,9 +291,6 @@ module tb_fifo;
     end
   endtask
 
-  //---------------------------------------------------------------
-  // Empty FIFO bypass
-  //---------------------------------------------------------------
   task automatic test_empty_bypass();
     $display("--- Running test_empty_bypass ---");
 
@@ -414,28 +301,17 @@ module tb_fifo;
     check("Test Bypass: reference model remains empty", ref_model.size() == 0);
   endtask
 
-  //---------------------------------------------------------------
-  // Full FIFO + simultaneous read/write
-  //
-  // This specifically verifies the new protocol:
-  //
-  //   READ  -> accepted
-  //   WRITE -> rejected
-  //   ERR   -> asserted
-  //---------------------------------------------------------------
   task automatic test_full_read_write();
     $display("--- Running test_full_read_write ---");
 
     reset_dut();
 
-    // Fill FIFO completely.
     for (int i = 0; i < FIFO_DEPTH; i++) begin
       drive_write(i);
     end
 
     check("Full R/W: FIFO initially full", full == 1'b1);
 
-    // Read + write while full.
     drive_read_write(32'hDEAD_BEEF);
 
     check("Full R/W: FIFO no longer full", full == 1'b0);
@@ -443,20 +319,15 @@ module tb_fifo;
     check("Full R/W: occupancy reduced", ref_model.size() == FIFO_DEPTH - 1);
   endtask
 
-  //---------------------------------------------------------------
-  // Write while full
-  //---------------------------------------------------------------
   task automatic test_protocol_violation();
     $display("--- Running test_protocol_violation ---");
 
     reset_dut();
 
-    // Fill FIFO completely.
     for (int i = 0; i < FIFO_DEPTH; i++) begin
       drive_write($urandom);
     end
 
-    // Attempt illegal write.
     drive_write($urandom);
 
     check("Protocol Violation: FIFO remains full", full == 1'b1);
@@ -464,9 +335,6 @@ module tb_fifo;
     check("Protocol Violation: occupancy unchanged", ref_model.size() == FIFO_DEPTH);
   endtask
 
-  //---------------------------------------------------------------
-  // 11. Randomized Test
-  //---------------------------------------------------------------
   task automatic test_random(input int num_transactions);
     int op;
 
@@ -491,9 +359,6 @@ module tb_fifo;
     end
   endtask
 
-  //---------------------------------------------------------------
-  // 12. Top-Level Test Sequence
-  //---------------------------------------------------------------
   initial begin
 
     test_reset();
@@ -522,9 +387,6 @@ module tb_fifo;
     $finish;
   end
 
-  //---------------------------------------------------------------
-  // 13. Waveform Dump
-  //---------------------------------------------------------------
   initial begin
     $dumpfile("sim/fifo.vcd");
     $dumpvars(0, tb_fifo);

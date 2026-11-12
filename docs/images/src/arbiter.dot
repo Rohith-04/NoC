@@ -1,0 +1,21 @@
+digraph G {
+ graph [rankdir=LR, splines=ortho, forcelabels=true, bgcolor="white", pad="0.35", nodesep="0.42", ranksep="0.65", fontname="DejaVu Sans", fontsize=20, labelloc=t, label="arbiter: independent virtual-channel and switch allocation paths"];
+ node [shape=box, style="filled", fillcolor="#f8fafc", color="#334155", penwidth=1.5, fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12"];
+ edge [color="#334155", fontname="DejaVu Sans", fontsize=10, arrowsize=0.75];
+
+ va [label="VA requests\nOutput port + input VC class\nHEAD_TAIL / HEAD",fillcolor="#f8fafc"];
+ match [label="Ordered matching per output\nFree same-class VC rows\nRound-robin requester scan\nExclude earlier winners"];
+ busy [label="alloc_busy + rr_va\nReserve on VA grant\nRelease on final-flit traversal",fillcolor="#e2e8f0",color="#334155"];
+ vg [label="va_gnt + va_gnt_out_vc",fillcolor="#f8fafc"];
+ sa [label="SA requests\nAssigned port / output VC\nLast-flit flag",fillcolor="#f8fafc"];
+ s1 [label="SA stage 1\nCredit eligibility + RR\nOne input VC per input port"];
+ s2 [label="SA stage 2\nRound-robin per output\nOne physical input per output"];
+ result [label="sa_pick / sa_gnt\nxbar_sel / st_valid / st_out_vc",fillcolor="#f8fafc"];
+ credit [label="credit_count[output][VC]\nReturn: increment\nTransfer: decrement\nBoth: hold",fillcolor="#e2e8f0",color="#334155"];
+ ret [label="ds_credit_valid",fillcolor="#f8fafc"];
+ va -> match; busy -> match [style=dashed]; match -> vg;
+ match -> busy [style=dashed,constraint=false];
+ sa -> s1; credit -> s1 [style=dashed]; s1 -> s2; s1 -> result [style=dashed,color="#334155"]; s2 -> result;
+ ret -> credit; s2 -> credit [style=dashed,constraint=false];
+ s2 -> busy [style=dashed,constraint=false];
+}

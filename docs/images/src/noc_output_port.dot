@@ -1,0 +1,13 @@
+digraph G {
+ graph [rankdir=LR, splines=ortho, forcelabels=true, bgcolor="white", pad="0.35", nodesep="0.42", ranksep="0.65", fontname="DejaVu Sans", fontsize=20, labelloc=t, label="noc_output_port: header-only route rewrite and registered transmission"];
+ node [shape=box, style="filled", fillcolor="#f8fafc", color="#334155", penwidth=1.5, fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12"];
+ edge [color="#334155", fontname="DejaVu Sans", fontsize=10, arrowsize=0.75];
+
+ data [label="xbar_out_data",fillcolor="#f8fafc"];
+ next [label="xbar_out_route_next",fillcolor="#f8fafc"];
+ merge [label="Header merge\nHEAD / HEAD_TAIL: replace ROUTE\nBODY / TAIL: preserve payload"];
+ ctrl [label="st_valid / st_out_vc\nAssigned downstream VC",fillcolor="#e2e8f0",color="#334155"];
+ reg [label="Link registers\nData / valid / VC\nclk + synchronous reset"];
+ out [label="flit_data / flit_valid / vc_id\nTo downstream input FIFO",fillcolor="#f8fafc"];
+ data -> merge; next -> merge; merge -> reg; ctrl -> reg [style=dashed]; reg -> out;
+}

@@ -1,0 +1,16 @@
+digraph G {
+ graph [rankdir=LR, splines=ortho, forcelabels=true, bgcolor="white", pad="0.35", nodesep="0.42", ranksep="0.65", fontname="DejaVu Sans", fontsize=20, labelloc=t, label="route_compute: current-hop selection and next-hop XY lookahead"];
+ node [shape=box, style="filled", fillcolor="#f8fafc", color="#334155", penwidth=1.5, fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12"];
+ edge [color="#334155", fontname="DejaVu Sans", fontsize=10, arrowsize=0.75];
+
+ dest [label="Destination X / Y", fillcolor="#f8fafc"];
+ xy [label="XY direction function\nResolve X before Y"];
+ route [label="Incoming route_in", fillcolor="#f8fafc"];
+ sel [label="Current-route selection\nLOCAL input: compute XY\nDirectional input: use route_in"];
+ self [label="route_self\nThis router’s output",fillcolor="#e2e8f0", color="#334155"];
+ coord [label="Step from CUR_X / CUR_Y\ntoward route_self"];
+ next [label="XY lookahead at next coordinates\nTerminate here: force LOCAL"];
+ out [label="route_next\nNext router’s output",fillcolor="#e2e8f0", color="#334155"];
+ dest -> xy; xy -> sel; route -> sel; sel -> self; sel -> coord;
+ coord -> next; dest -> next; next -> out;
+}

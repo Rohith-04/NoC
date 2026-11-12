@@ -1,0 +1,24 @@
+digraph G {
+ graph [rankdir=LR, splines=ortho, forcelabels=true, bgcolor="white", pad="0.35", nodesep="0.42", ranksep="0.65", fontname="DejaVu Sans", fontsize=20, labelloc=t, label="Router: five physical inputs, shared allocation, five physical outputs"];
+ node [shape=box, style="filled", fillcolor="#f8fafc", color="#334155", penwidth=1.5, fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12"];
+ edge [color="#334155", fontname="DejaVu Sans", fontsize=10, arrowsize=0.75];
+
+ incoming [label="Incoming links ×5\ndata / valid / input VC", fillcolor="#f8fafc"];
+ ip [label="noc_input_port ×5\nPer-VC FIFO + route_compute\nPacket assignment + input mux"];
+ x [label="crossbar\n5 × 5 data and lookahead mux"];
+ op [label="noc_output_port ×5\nHeader route merge\nRegistered link + output VC"];
+ outgoing [label="Outgoing links ×5\ndata / valid / assigned VC", fillcolor="#f8fafc"];
+ a [label="arbiter\nDynamic same-class VA\nSA stage 1 + stage 2\nReservations + credit counters", fillcolor="#e2e8f0", color="#334155"];
+ ds [label="Downstream credit returns\nOne bit per port / output VC", fillcolor="#f8fafc"];
+ up [label="Upstream credit returns\nOne bit per port / input VC", fillcolor="#f8fafc"];
+ incoming -> ip ;
+ ip -> x ;
+ x -> op ;
+ op -> outgoing ;
+ ip -> a [ color="#334155", style=dashed];
+ a -> ip [ color="#334155", style=dashed, constraint=false];
+ a -> x [ color="#334155", style=dashed];
+ a -> op [ color="#334155", style=dashed];
+ ds -> a [ color="#334155", style=dashed];
+ ip -> up [ color="#334155", style=dashed];
+}

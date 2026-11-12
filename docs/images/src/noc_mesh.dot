@@ -1,0 +1,21 @@
+digraph G {
+ graph [rankdir=LR, splines=ortho, forcelabels=true, bgcolor="white", pad="0.35", nodesep="0.42", ranksep="0.65", fontname="DejaVu Sans", fontsize=20, labelloc=t, label="noc_mesh: generated ROWS × COLS router array (2 × 2 example)"];
+ node [shape=box, style="filled", fillcolor="#f8fafc", color="#334155", penwidth=1.5, fontname="DejaVu Sans", fontsize=12, margin="0.18,0.12"];
+ edge [color="#334155", fontname="DejaVu Sans", fontsize=10, arrowsize=0.75];
+
+ node [fontsize=12];
+ inj [label="Per-tile LOCAL injection\ninj_data / inj_valid / inj_vc",fillcolor="#f8fafc"];
+ r00 [label="router_top (0,0)"]; r01 [label="router_top (1,0)"];
+ r10 [label="router_top (0,1)"]; r11 [label="router_top (1,1)"];
+ ej [label="Per-tile LOCAL ejection\nej_data / ej_valid / ej_vc",fillcolor="#f8fafc"];
+ ni [label="LOCAL credit interfaces\nlc_credit: fetch returns to source\nlc_ds_credit: returns from sink",fillcolor="#e2e8f0",color="#334155"];
+ {rank=same; r00; r10;} {rank=same; r01; r11;}
+ r00 -> r01 [dir=both,];
+ r10 -> r11 [dir=both,];
+ r00 -> r10 [dir=both,constraint=false];
+ r01 -> r11 [dir=both,constraint=false];
+ inj -> r00 ; r01 -> ej ;
+ ni -> r10 [style=dashed,color="#334155"];
+ note [shape=box,label="Each tile has its own injection, ejection and credits.\nEach directional link carries data + valid + VC forward\nand a per-VC credit vector back.\nAbsent boundary inputs are tied off.",fillcolor="#f8fafc",color="#94a3b8"];
+ r11 -> note [style=invis];
+}
