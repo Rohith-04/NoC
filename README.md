@@ -4,9 +4,8 @@ Linnea is a parameterized **five-port, wormhole-switched Network-on-Chip** with
 **deterministic XY routing**, **dynamic virtual-channel allocation**, and
 **credit-based flow control**. Written in SystemVerilog for the Linnea multicore
 processor, it provides reusable routers and a configurable two-dimensional mesh.
-AXI4 is the planned network interface, with additional protocol interfaces to
-follow. This checkout currently implements the flit-based router and mesh;
-the AXI4 adapter is not yet included.
+The implemented interface carries flits, VC IDs and credits. AXI4 network
+interface integration is planned.
 
 **[Architecture guide](docs/architecture.md) | [RTL modules](docs/rtl/) | [Build guide](docs/Makefile.md) | [Verification results](docs/dynamic_va_validation.md)**
 
@@ -47,8 +46,8 @@ outputs. See the **[build guide](docs/Makefile.md)** for further commands.
 | Routing | Deterministic XY: resolve the X coordinate first, then Y. Lookahead prepares the next router’s direction. |
 | Packet switching | Wormhole switching with HEAD, BODY, TAIL and single-flit HEAD_TAIL packets. |
 | Virtual channels | `NUM_VC=2`, `4` or `8` per input port; default 4. Each input VC has its own FIFO. |
-| Traffic classes | Lower half of VCs carry requests; upper half carry responses. Class comes from the incoming VC sideband. |
-| VC allocation | Dynamic allocation to any free downstream VC in the same class, independently at every hop. HEAD_TAIL has priority over HEAD. |
+| Traffic classes | The lower half of VCs is designated for requests and the upper half for responses. RTL preserves the class from the incoming VC sideband independently of header KIND. |
+| VC allocation | Allocates a free downstream VC in the same class at each hop and reserves it until the packet's final flit traverses the switch. Each output VC considers eligible HEAD_TAIL requests before HEAD requests. |
 | Switch allocation | Two round-robin stages: select one VC per input, then one input per output. Each physical link carries at most one flit per cycle. |
 | Flow control | Per-output-VC credits prevent downstream FIFO overflow. Credits return when the receiver fetches a flit. |
 | Buffering | Parameterized FIFO depth, registered FIFO output, empty-FIFO bypass and replacement fetch during a successful transfer. Default depth is 4. |
@@ -58,12 +57,9 @@ outputs. See the **[build guide](docs/Makefile.md)** for further commands.
 
 ## Project status and roadmap
 
-**Current state: router and mesh RTL implemented and simulation-verified.**
-The dynamic allocator passed the recorded 45-run regression, including nine
-benches, eight lint targets, 24 parameter sweeps and four additional mesh
-geometries. Final long-packet chain tests check remapping, credit returns and
-flit ordering across multiple hops. See **[executed verification results](docs/dynamic_va_validation.md)**
-for exact configurations, check counts and validation limits.
+The router and mesh RTL implement the flit datapath and per-hop VC allocation.
+The [2026-11-12 validation history](docs/dynamic_va_validation.md#historical-validation--2026-11-12)
+records the initial dynamic allocator regression and strengthened chain reruns.
 
 ### Completed
 
@@ -82,11 +78,48 @@ for exact configurations, check counts and validation limits.
 - [ ] Synthesis and area/resource measurements for the dynamic allocator.
 - [ ] Static timing analysis, timing closure and FPGA implementation.
 - [ ] Throughput, latency and contention measurements.
-- [ ] Formal verification and reruns of the separate mutation/assertion-negative suites for the updated allocator.
+- [ ] Formal verification.
 
-The current verification uses 40-bit flits, VC counts 2/4/8 and selected FIFO
-depths 4/8. It does not establish synthesis or timing closure. LOCAL-to-LOCAL
-loopback is outside the routing table; the mesh bench requires at least two tiles.
+## Resume verification evidence — 2026-11-20
+
+Source `328f41eab6347fb01466626cc87de96ac67bc2de`, clean working tree at
+start. Verilator 5.020 (Debian 5.020-1).
+[Environment](results/2026-11-20/environment.log) ·
+[Exact commands, check counts and per-case evidence](docs/dynamic_va_validation.md#current-validation--2026-11-20)
+
+| Executed command | Result |
+|---|---|
+| `make regress` | **45 passed, 0 failed** (exit 0). 37 assertion-enabled simulations and 8 strict RTL lint runs. [Log](results/2026-11-20/regression.log) |
+| `bash tools/mutate_all.sh` and `bash tools/mutate_out.sh` | **8 of 8 detected** by functional checkers. All eight applied and ran, with zero survivors, skips or errors. [Core cases](results/2026-11-20/mutate_all.log) · [Output-port cases](results/2026-11-20/mutate_out.log) |
+| `bash tools/assert_neg.sh` and isolated repaired rerun | Original definitions **6 fired, 1 stale skip**. Replacement suite **7 fired**, including the cross-class allocation assertion. Zero misses or errors in either completed suite. [Original](results/2026-11-20/assert_neg.log) · [Repaired](results/2026-11-20/assert_neg_repaired.log) |
+| `make TOP=noc_mesh lint GFLAGS='-GROWS=8 -GCOLS=8 -GNUM_VC=8'` | **Passed** strict RTL lint and elaboration with assertions enabled. [Log](results/2026-11-20/mesh-8x8-lint.log) |
+| `make TOP=noc_mesh OBJ_DIR=obj_8x8 sim ROWS=8 COLS=8 GFLAGS=-GNUM_VC=8` | Stopped the serial C++ build before link and simulation (exit 2). [Original attempt](results/2026-11-20/mesh-8x8-sim.log) |
+| `make -C obj_8x8/v_noc_mesh -f Vtb_noc_mesh.mk -j6` | **Build passed.** Linked the same generated model in 498.02 s. [Build log](results/2026-11-20/mesh-8x8-build-resume.log) |
+| `./obj_8x8/v_noc_mesh/run` | **Simulation passed** in 23.41 s with 106,916 checks, 8,064 packets and 30,240 flits scored. [Simulation log](results/2026-11-20/mesh-8x8-run.log) |
+
+The fault suites used an isolated copy and a logging harness.
+
+**Default bench checks.** FIFO 879, route compute 49,178, input port 171,
+arbiter 103, crossbar 286, output port 139, router 104, strengthened
+three-router chain 1,640, and 2×2 mesh 326.
+
+**Functionally tested meshes.** Regression passed 2×2 at
+`(NUM_VC, FIFO_DEPTH)` = (2,4), (4,4), (8,4), and (4,8). The additional
+geometries at (4,4) were 1×2 (59 checks), 2×1 (59), 3×3 (1,933),
+and 2×3 (805). The separate 8×8 run passed at (8,4). The sweeps vary VC
+count and FIFO depth independently. The all-to-all bench requires two or
+more tiles.
+
+**Resume-safe claims.** Implemented a five-port wormhole XY router and mesh
+with lookahead, per-hop same-class VC reservations and per-VC credits.
+Passed the 45-run Verilator regression, demonstrated forced multi-hop
+remapping in both traffic classes with four and eight VCs, and verified
+64-router all-to-all traffic with eight VCs per port. Detected eight
+injected RTL faults with functional checkers.
+
+These results cover 40-bit flits and the listed workloads. Synthesis,
+timing closure, formal proof, and FPGA implementation remain unverified.
+AXI4 network interface integration is planned.
 
 ## Architecture and module documentation
 
